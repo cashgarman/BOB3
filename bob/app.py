@@ -1159,8 +1159,8 @@ class Assistant:
                 self._commit_turn("assistant", assistant_text)
                 committed_assistant = True
             if started:
-                if not self.speech.wait(epoch, timeout=120.0):
-                    log.warning("Speech playback timed out; cancelling audio")
+                if not self.speech.wait(epoch):
+                    log.warning("Speech playback ended before completion")
                     self.speech.cancel()
         except Exception as exc:
             self._talk_set_reply(f"Error: {exc}")

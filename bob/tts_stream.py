@@ -67,7 +67,7 @@ class SpeechStreamer:
         self._epoch = 0
         self.audio.cancel_playback()
 
-    def wait(self, epoch: int, timeout: float = 120.0) -> bool:
+    def wait(self, epoch: int, timeout: float | None = None) -> bool:
         return self.audio.wait_utterance(epoch, timeout=timeout)
 
     def _drain(self) -> None:
