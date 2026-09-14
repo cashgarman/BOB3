@@ -47,6 +47,20 @@ class TextToSpeech:
         if on_status:
             on_status("Loading Kokoro TTS (CPU) ...")
         self._kokoro = Kokoro(str(onnx), str(voices))
+        try:
+            self._kokoro.create("Ready.", voice=self.voice, speed=1.0)
+        except Exception:
+            pass
+
+    async def synthesize_stream(self, text: str):
+        if self._kokoro is None:
+            raise RuntimeError("TTS is not loaded")
+        text = (text or "").strip()
+        if not text:
+            return
+        async for samples, sr in self._kokoro.create_stream(text, voice=self.voice, speed=1.0):
+            self.sample_rate = int(sr)
+            yield np.asarray(samples, dtype=np.float32), int(sr)
 
     def synthesize(self, text: str) -> tuple[np.ndarray, int]:
         if self._kokoro is None:

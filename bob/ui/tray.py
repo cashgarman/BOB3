@@ -87,6 +87,8 @@ class Tray:
                     pystray.MenuItem("TTS voice", pystray.Menu(*[radio("tts_voice", v) for v in VOICES])),
                     bool_item("Wake word enabled", "wake_word_enabled"),
                     pystray.MenuItem("Wake word", pystray.Menu(*[radio("wake_word", w) for w in WAKE_WORDS])),
+                    bool_item("Auto-endpoint", "auto_endpoint"),
+                    bool_item("Voice barge-in", "barge_in"),
                     pystray.MenuItem("Hotkey…", lambda *_: self.app.open_settings()),
                 ),
             ),

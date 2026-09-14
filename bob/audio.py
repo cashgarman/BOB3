@@ -10,6 +10,8 @@ import sounddevice as sd
 
 WAVE_BARS = 72
 PEAKS_PER_CHUNK = 8
+PLAY_SR = 24000
+PLAY_BLOCK = 512
 
 
 def rms(samples: np.ndarray) -> float:
@@ -31,8 +33,17 @@ def _chunk_peaks(samples: np.ndarray, bins: int = PEAKS_PER_CHUNK) -> np.ndarray
     return np.max(np.abs(trimmed), axis=1).astype(np.float32)
 
 
+def _resample(samples: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+    if src_sr == dst_sr or samples.size == 0:
+        return np.ascontiguousarray(samples, dtype=np.float32).reshape(-1)
+    n = max(1, int(round(samples.size * dst_sr / src_sr)))
+    x = np.linspace(0.0, 1.0, samples.size, endpoint=False)
+    xi = np.linspace(0.0, 1.0, n, endpoint=False)
+    return np.interp(xi, x, samples.astype(np.float32)).astype(np.float32)
+
+
 class AudioHub:
-    """16 kHz capture plus on-demand playback. Listening is a toggle buffer."""
+    """16 kHz capture plus an always-open 24 kHz streaming playback sink."""
 
     def __init__(
         self,
@@ -55,12 +66,19 @@ class AudioHub:
         self._stream: sd.InputStream | None = None
         self._play_stream: sd.OutputStream | None = None
         self._play_queue: deque[np.ndarray] = deque()
-        self._play_sr = 24000
+        self._play_sr = PLAY_SR
         self._play_current: np.ndarray | None = None
         self._play_offset = 0
         self._play_done = threading.Event()
         self._play_done.set()
-        self._stop_play = threading.Event()
+        self._cancel_play = threading.Event()
+        self._epoch = 0
+        self._active_epoch = 0
+        self._ended = True
+
+    @property
+    def active_epoch(self) -> int:
+        return self._active_epoch
 
     def start(self, on_chunk: Callable[[np.ndarray], None] | None = None) -> None:
         self._on_chunk = on_chunk
@@ -76,9 +94,13 @@ class AudioHub:
             **kwargs,
         )
         self._stream.start()
+        try:
+            self._ensure_play_stream()
+        except Exception:
+            pass
 
     def stop(self) -> None:
-        self.stop_playback()
+        self.cancel_playback()
         if self._stream is not None:
             self._stream.stop()
             self._stream.close()
@@ -100,9 +122,11 @@ class AudioHub:
         if self._on_chunk is not None and not muted:
             self._on_chunk(mono)
 
-    def start_listening(self) -> None:
+    def start_listening(self, seed: np.ndarray | None = None) -> None:
         with self._lock:
             self._listen_chunks.clear()
+            if seed is not None and seed.size:
+                self._listen_chunks.append(np.ascontiguousarray(seed, dtype=np.float32).reshape(-1))
             self._wave_bars[:] = 0
             self._listening = True
 
@@ -135,103 +159,149 @@ class AudioHub:
         if n <= 0:
             return
         with self._lock:
-            if n < WAVE_BARS:
-                self._wave_bars[:-n] = self._wave_bars[n:]
-            self._wave_bars[-n:] = peaks[-n:]
+            self._write_wave(peaks, n)
+
+    def _write_wave(self, peaks: np.ndarray, n: int) -> None:
+        if n < WAVE_BARS:
+            self._wave_bars[:-n] = self._wave_bars[n:]
+        self._wave_bars[-n:] = peaks[-n:]
 
     def set_capture_muted(self, muted: bool) -> None:
         self._capture_muted = muted
 
-    def play(self, samples: np.ndarray, sample_rate: int) -> None:
-        """Block until playback finishes or stop_playback() is called."""
-        self.stop_playback()
+    def begin_utterance(self) -> int:
+        with self._lock:
+            self._epoch += 1
+            self._active_epoch = self._epoch
+            self._ended = False
+            self._play_queue.clear()
+            self._play_current = None
+            self._play_offset = 0
+            self._cancel_play.clear()
+            self._play_done.clear()
+            epoch = self._active_epoch
+        try:
+            self._ensure_play_stream()
+        except Exception:
+            self._play_done.set()
+        return epoch
+
+    def enqueue(self, epoch: int, samples: np.ndarray, sample_rate: int | None = None) -> None:
         if samples.size == 0:
             return
         audio = np.ascontiguousarray(samples, dtype=np.float32).reshape(-1)
-        self._stop_play.clear()
-        self._play_done.clear()
-        self._play_sr = sample_rate
-        self._play_queue.clear()
-        self._play_queue.append(audio)
-        self._play_current = None
-        self._play_offset = 0
-        self._ensure_play_stream(sample_rate)
+        if sample_rate and sample_rate != self._play_sr:
+            audio = _resample(audio, sample_rate, self._play_sr)
+        with self._lock:
+            if epoch != self._active_epoch or self._cancel_play.is_set() or self._ended:
+                return
+            self._play_queue.append(audio)
+
+    def end_utterance(self, epoch: int) -> None:
+        with self._lock:
+            if epoch != self._active_epoch:
+                return
+            self._ended = True
+            if self._queue_drained():
+                self._play_done.set()
+
+    def wait_utterance(self, epoch: int) -> None:
+        with self._lock:
+            if epoch != self._active_epoch:
+                return
         self._play_done.wait()
 
+    def cancel_playback(self) -> None:
+        with self._lock:
+            self._epoch += 1
+            self._active_epoch = self._epoch
+            self._ended = True
+            self._play_queue.clear()
+            self._play_current = None
+            self._play_offset = 0
+            self._cancel_play.set()
+            self._play_done.set()
+
+    def stop_playback(self) -> None:
+        self.cancel_playback()
+
+    def play(self, samples: np.ndarray, sample_rate: int) -> None:
+        """Block until playback finishes or cancel_playback() is called."""
+        epoch = self.begin_utterance()
+        self.enqueue(epoch, samples, sample_rate)
+        self.end_utterance(epoch)
+        self.wait_utterance(epoch)
+
     def play_async(self, samples: np.ndarray, sample_rate: int) -> None:
-        if samples.size == 0:
-            return
-        audio = np.ascontiguousarray(samples, dtype=np.float32).reshape(-1)
-        self._stop_play.clear()
-        self._play_done.clear()
-        self._play_sr = sample_rate
-        self._play_queue.append(audio)
-        self._ensure_play_stream(sample_rate)
+        epoch = self._active_epoch
+        if self._play_done.is_set() or epoch == 0:
+            epoch = self.begin_utterance()
+        self.enqueue(epoch, samples, sample_rate)
 
     def wait_playback(self) -> None:
         self._play_done.wait()
-
-    def stop_playback(self) -> None:
-        self._stop_play.set()
-        self._play_queue.clear()
-        self._play_current = None
-        self._play_offset = 0
-        self._play_done.set()
 
     @property
     def is_playing(self) -> bool:
         return not self._play_done.is_set()
 
-    def _ensure_play_stream(self, sample_rate: int) -> None:
-        if self._play_stream is not None and self._play_sr == sample_rate:
+    def _queue_drained(self) -> bool:
+        current_done = self._play_current is None or self._play_offset >= len(self._play_current)
+        return current_done and not self._play_queue
+
+    def _ensure_play_stream(self) -> None:
+        if self._play_stream is not None:
             if not self._play_stream.active:
                 self._play_stream.start()
             return
-        if self._play_stream is not None:
-            self._play_stream.stop()
-            self._play_stream.close()
-        self._play_sr = sample_rate
         kwargs = {}
         if self.output_device:
             kwargs["device"] = self.output_device
         self._play_stream = sd.OutputStream(
-            samplerate=sample_rate,
+            samplerate=self._play_sr,
             channels=1,
             dtype="float32",
-            blocksize=2048,
+            blocksize=PLAY_BLOCK,
             callback=self._on_output,
             **kwargs,
         )
         self._play_stream.start()
 
     def _on_output(self, outdata, frames, time_info, status) -> None:  # noqa: ANN001
-        if self._stop_play.is_set():
+        if self._cancel_play.is_set():
             outdata.fill(0)
             self._play_done.set()
             return
         needed = frames
         out = np.zeros(frames, dtype=np.float32)
         pos = 0
-        while needed > 0:
-            if self._play_current is None or self._play_offset >= len(self._play_current):
-                if self._play_queue:
-                    self._play_current = self._play_queue.popleft()
-                    self._play_offset = 0
-                else:
-                    break
-            remain = len(self._play_current) - self._play_offset
-            take = min(needed, remain)
-            out[pos : pos + take] = self._play_current[self._play_offset : self._play_offset + take]
-            self._play_offset += take
-            pos += take
-            needed -= take
+        with self._lock:
+            while needed > 0:
+                if self._play_current is None or self._play_offset >= len(self._play_current):
+                    if self._play_queue:
+                        self._play_current = self._play_queue.popleft()
+                        self._play_offset = 0
+                    else:
+                        break
+                remain = len(self._play_current) - self._play_offset
+                take = min(needed, remain)
+                out[pos : pos + take] = self._play_current[self._play_offset : self._play_offset + take]
+                self._play_offset += take
+                pos += take
+                needed -= take
+            ended = self._ended
+            drained = self._queue_drained()
         outdata[:, 0] = out
         if needed < frames:
-            self._push_wave(out)
+            peaks = _chunk_peaks(out)
+            n = min(int(peaks.size), WAVE_BARS)
+            if n > 0:
+                with self._lock:
+                    self._write_wave(peaks, n)
         else:
             with self._lock:
                 self._wave_bars *= np.float32(0.72)
-        if needed == frames:
+        if ended and drained:
             self._play_done.set()
 
 

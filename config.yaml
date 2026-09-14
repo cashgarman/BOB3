@@ -21,3 +21,7 @@ input_device: ''
 output_device: ''
 memory_autosave: true
 memory_max_inject: 8
+tools_enabled: true
+tool_timeout_sec: 20.0
+max_tool_rounds: 4
+mcp_servers: []

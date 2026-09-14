@@ -59,7 +59,17 @@ class SettingsDialog(ctk.CTkToplevel):
         self._check(frame, "Wake word enabled", "wake_word_enabled")
         self._entry(frame, "Wake threshold", "wake_threshold")
         self._hotkey_picker(frame)
-        self._entry(frame, "Max silence seconds (0=off)", "max_silence_sec")
+        self._check(frame, "Auto-endpoint (send after a pause)", "auto_endpoint")
+        self._entry(frame, "Endpoint silence (ms)", "endpoint_silence_ms")
+        self._check(frame, "Voice barge-in", "barge_in")
+        self._hint(
+            frame,
+            "Barge-in assumes headphones. On speakers Bob will hear himself and cut off.",
+        )
+        self._entry(frame, "Barge-in speech (ms)", "barge_in_speech_ms")
+        self._entry(frame, "STT partial interval (ms)", "stt_partial_interval_ms")
+        self._entry(frame, "STT commit silence (ms)", "stt_commit_silence_ms")
+        self._entry(frame, "VAD threshold", "vad_threshold")
         self._entry(frame, "Sample rate", "sample_rate")
         self._entry(frame, "Ollama host", "ollama_host")
         self._entry(frame, "Ollama GPU overhead bytes", "ollama_gpu_overhead")
@@ -70,6 +80,9 @@ class SettingsDialog(ctk.CTkToplevel):
         self._check(frame, "Start with Windows", "start_with_windows")
         self._check(frame, "Memory autosave", "memory_autosave")
         self._entry(frame, "Max memories injected", "memory_max_inject")
+        self._check(frame, "Tools enabled", "tools_enabled")
+        self._entry(frame, "Tool timeout seconds", "tool_timeout_sec")
+        self._entry(frame, "Max tool rounds per turn", "max_tool_rounds")
 
         ctk.CTkLabel(frame, text="System prompt", anchor="w").pack(fill="x", pady=(10, 2))
         self.prompt = ctk.CTkTextbox(frame, height=120)
@@ -142,6 +155,16 @@ class SettingsDialog(ctk.CTkToplevel):
         self.vars[key] = var
         ctk.CTkComboBox(parent, values=values or [""], variable=var).pack(fill="x")
 
+    def _hint(self, parent, text: str) -> None:
+        ctk.CTkLabel(
+            parent,
+            text=text,
+            anchor="w",
+            text_color="#6b7280",
+            font=("Segoe UI", 12),
+            wraplength=500,
+        ).pack(fill="x", pady=(0, 4))
+
     def _check(self, parent, label: str, key: str) -> None:
         var = ctk.BooleanVar(value=bool(getattr(self.settings, key)))
         self.vars[key] = var
@@ -151,8 +174,19 @@ class SettingsDialog(ctk.CTkToplevel):
         raw = {key: var.get() for key, var in self.vars.items()}
         raw["system_prompt"] = self.prompt.get("1.0", "end").strip()
         typed = {}
-        ints = {"llm_num_ctx", "sample_rate", "ollama_gpu_overhead", "max_history_turns", "memory_max_inject"}
-        floats = {"wake_threshold", "max_silence_sec"}
+        ints = {
+            "llm_num_ctx",
+            "sample_rate",
+            "ollama_gpu_overhead",
+            "max_history_turns",
+            "memory_max_inject",
+            "max_tool_rounds",
+            "endpoint_silence_ms",
+            "barge_in_speech_ms",
+            "stt_partial_interval_ms",
+            "stt_commit_silence_ms",
+        }
+        floats = {"wake_threshold", "vad_threshold", "max_silence_sec", "tool_timeout_sec"}
         for key, value in raw.items():
             if key in ints:
                 typed[key] = int(float(value or 0))

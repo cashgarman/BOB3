@@ -24,6 +24,13 @@ class Settings:
     wake_threshold: float = 0.5
     hotkey: str = "ctrl+shift+space"
     max_silence_sec: float = 0.0
+    auto_endpoint: bool = False
+    endpoint_silence_ms: int = 700
+    barge_in: bool = True
+    barge_in_speech_ms: int = 250
+    stt_partial_interval_ms: int = 250
+    stt_commit_silence_ms: int = 500
+    vad_threshold: float = 0.5
     sample_rate: int = 16000
     ollama_host: str = "http://127.0.0.1:11434"
     ollama_gpu_overhead: int = 1610612736
@@ -67,4 +74,12 @@ def load_settings(path: Path = CONFIG_PATH) -> Settings:
         if key not in known:
             continue
         coerced[key] = value
+    if "endpoint_silence_ms" not in coerced and "max_silence_sec" in coerced:
+        try:
+            sec = float(coerced.get("max_silence_sec") or 0)
+        except (TypeError, ValueError):
+            sec = 0.0
+        if sec > 0:
+            coerced["endpoint_silence_ms"] = int(sec * 1000)
+            coerced.setdefault("auto_endpoint", True)
     return Settings(**coerced)

@@ -9,7 +9,7 @@ from typing import Any, Literal, get_args, get_origin
 
 from bob.tools.base import ToolContext, ToolError, ToolSpec, sanitize_name
 
-_CONTEXT_NAMES = {"ctx", "context", "bob"}
+_CONTEXT_NAMES = {"ctx", "context"}
 _SCALARS: dict[Any, str] = {
     str: "string",
     bool: "boolean",

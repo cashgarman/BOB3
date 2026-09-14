@@ -14,15 +14,18 @@ from bob.state import State
 from bob.startup import is_enabled as startup_is_enabled
 from bob.startup import set_enabled as startup_set_enabled
 from bob.stt import SpeechToText
+from bob.stt_stream import StreamingTranscriber
 from bob.tools import ToolRegistry
 from bob.tts import TextToSpeech
+from bob.tts_stream import SpeechStreamer
 from bob.ui.memories import MemoriesWindow
 from bob.ui.hud import TalkHud
 from bob.ui.listen_toast import ListenToast
 from bob.ui.overlay import Overlay
 from bob.ui.settings_dialog import SettingsDialog
 from bob.ui.tray import Tray
-from bob.util import gpu_memory_line, split_sentences
+from bob.util import gpu_memory_line, split_speakable
+from bob.vad import Endpointer
 from bob.wakeword import WakeWordDetector
 
 RESTART_FIELDS = {"stt_model", "stt_compute_type", "sample_rate"}
@@ -36,11 +39,10 @@ class Assistant:
         self._stop = threading.Event()
         self._cancel = threading.Event()
         self._state_lock = threading.Lock()
-        self._stt_lock = threading.Lock()
         self._pipeline_thread: threading.Thread | None = None
         self._chunk_q: queue.Queue = queue.Queue(maxsize=64)
-        self._last_voice = time.monotonic()
-        self._heard_speech = False
+        self._endpoint_armed = False
+        self._barge_armed = False
         self.overlay: Overlay | None = None
         self.hud: TalkHud | None = None
         self.toast: ListenToast | None = None
@@ -66,6 +68,26 @@ class Assistant:
             MODELS_DIR / "whisper",
         )
         self.tts = TextToSpeech(MODELS_DIR / "kokoro", self.settings.tts_voice)
+        self.stt_stream = StreamingTranscriber(
+            self.stt,
+            sample_rate=self.settings.sample_rate,
+            commit_silence_ms=self.settings.stt_commit_silence_ms,
+            partial_interval_ms=self.settings.stt_partial_interval_ms,
+            vad_threshold=self.settings.vad_threshold,
+            on_partial=self._on_partial,
+        )
+        self.speech = SpeechStreamer(self.tts, self.audio)
+        self._listen_endpointer = Endpointer(
+            sample_rate=self.settings.sample_rate,
+            threshold=self.settings.vad_threshold,
+            min_silence_ms=self.settings.endpoint_silence_ms,
+        )
+        self._barge_endpointer = Endpointer(
+            sample_rate=self.settings.sample_rate,
+            threshold=self.settings.vad_threshold,
+            min_silence_ms=200,
+            min_speech_ms=self.settings.barge_in_speech_ms,
+        )
         self.llm = OllamaChat(
             self.settings.ollama_host,
             self.settings.llm_model,
@@ -123,6 +145,8 @@ class Assistant:
             self._load_tools(status)
             status("Microphone")
             self.audio.start(on_chunk=self._enqueue_chunk)
+            self.stt_stream.start()
+            self.speech.start()
             threading.Thread(target=self._chunk_loop, name="chunks", daemon=True).start()
             self._restart_hotkey()
             status(f"Loading {self.settings.llm_model}")
@@ -132,7 +156,6 @@ class Assistant:
             self._ui(lambda: self.overlay.set_meta(detail))
             if self.tray:
                 self._ui(self.tray.refresh)
-            threading.Thread(target=self._caption_loop, name="captions", daemon=True).start()
         except Exception as exc:
             self._set_state(State.ERROR, str(exc)[:80])
             self._ui(lambda: self.overlay.set_reply(str(exc)))
@@ -204,6 +227,12 @@ class Assistant:
             self.tray.refresh()
 
     def apply_settings_dict(self, values: dict) -> None:
+        if "auto_endpoint" in values:
+            if values["auto_endpoint"]:
+                ms = int(values.get("endpoint_silence_ms") or self.settings.endpoint_silence_ms)
+                values["max_silence_sec"] = ms / 1000.0
+            else:
+                values["max_silence_sec"] = 0.0
         restart = any(str(getattr(self.settings, k, None)) != str(v) for k, v in values.items() if k in RESTART_FIELDS)
         self.settings.update(**values)
         self.llm.host = self.settings.ollama_host.rstrip("/")
@@ -216,6 +245,7 @@ class Assistant:
         self.wake.threshold = self.settings.wake_threshold
         if self.settings.wake_word != self.wake.model_name:
             self.wake.model_name = self.settings.wake_word
+        self._configure_streaming()
         self.set_overlay_visible(self.settings.show_overlay, persist=False)
         self.set_start_with_windows(self.settings.start_with_windows)
         if not self.settings.tools_enabled:
@@ -260,6 +290,21 @@ class Assistant:
             self.set_start_with_windows(bool(value))
         elif field == "tools_enabled":
             self._reload_tools()
+        elif field in {
+            "auto_endpoint",
+            "endpoint_silence_ms",
+            "barge_in",
+            "barge_in_speech_ms",
+            "stt_partial_interval_ms",
+            "stt_commit_silence_ms",
+            "vad_threshold",
+        }:
+            if field == "auto_endpoint":
+                self.settings.max_silence_sec = (
+                    self.settings.endpoint_silence_ms / 1000.0 if value else 0.0
+                )
+                self.settings.save()
+            self._configure_streaming()
         self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
 
     def set_overlay_visible(self, visible: bool, persist: bool = True) -> None:
@@ -359,6 +404,18 @@ class Assistant:
         if listening:
             self.audio.start_listening()
 
+    def _configure_streaming(self) -> None:
+        s = self.settings
+        self.stt_stream.configure(
+            commit_silence_ms=s.stt_commit_silence_ms,
+            partial_interval_ms=s.stt_partial_interval_ms,
+            vad_threshold=s.vad_threshold,
+            sample_rate=s.sample_rate,
+        )
+        self._listen_endpointer.configure(threshold=s.vad_threshold, min_silence_ms=s.endpoint_silence_ms)
+        self._barge_endpointer.configure(threshold=s.vad_threshold)
+        self._barge_endpointer.min_speech_ms = int(s.barge_in_speech_ms)
+
     def _preload_safe(self) -> None:
         try:
             self.llm.preload()
@@ -404,15 +461,25 @@ class Assistant:
         state = self.state
         if state == State.IDLE and self.wake.enabled and not self.wake.error:
             self.wake.feed(chunk)
+        if state == State.SPEAKING and self.settings.barge_in and self._barge_armed:
+            ep = self._barge_endpointer.feed(chunk)
+            if ep.in_speech and ep.speech_ms >= float(self.settings.barge_in_speech_ms):
+                self._barge_armed = False
+                seed = self._barge_endpointer.take_speech_seed()
+                self._ui(lambda s=seed: self._barge_in(s))
+            return
         if state != State.LISTENING:
             return
-        if rms(chunk) > 0.015:
-            self._last_voice = time.monotonic()
-            self._heard_speech = True
-        timeout = float(self.settings.max_silence_sec or 0)
-        if timeout > 0 and self._heard_speech:
-            if time.monotonic() - self._last_voice >= timeout:
-                self.toggle_listen()
+        self.stt_stream.push(chunk)
+        ep = self._listen_endpointer.feed(chunk)
+        if (
+            self.settings.auto_endpoint
+            and self._endpoint_armed
+            and ep.heard_speech
+            and ep.silence_ms >= float(self.settings.endpoint_silence_ms)
+        ):
+            self._endpoint_armed = False
+            self._ui(self._finish_listen)
 
     def _on_wake(self) -> None:
         if self.state == State.IDLE:
@@ -427,12 +494,12 @@ class Assistant:
             return
         if state == State.SPEAKING:
             self._cancel.set()
-            self.audio.stop_playback()
+            self.speech.cancel()
             self._begin_listen()
             return
         if state == State.THINKING:
             self._cancel.set()
-            self.audio.stop_playback()
+            self.speech.cancel()
             self._begin_listen()
             return
         if state == State.LISTENING:
@@ -772,6 +839,17 @@ def run_check() -> int:
     except Exception as exc:
         print(f"memory:  FAILED ({exc})")
         return 1
+    if settings.tools_enabled:
+        print("tools:   loading ...")
+        tools = ToolRegistry(DATA_DIR, settings=settings, memory=memory)
+        names = tools.load()
+        names += tools.load_mcp(settings.mcp_servers, timeout=float(settings.tool_timeout_sec))
+        print(f"tools:   {len(names)} ready ({', '.join(sorted(names))})")
+        for err in tools.errors:
+            print(f"tools:   WARN {err}")
+        tools.close()
+    else:
+        print("tools:   disabled")
     print(f"gpu:    {gpu_memory_line()}")
     print("check:  ok")
     return 0

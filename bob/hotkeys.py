@@ -16,11 +16,22 @@ user32.UnhookWindowsHookEx.argtypes = [wintypes.HHOOK]
 user32.GetMessageW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.UINT]
 user32.GetMessageW.restype = ctypes.c_int
 user32.PostThreadMessageW.argtypes = [wintypes.DWORD, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, wintypes.UINT, wintypes.UINT]
+user32.RegisterHotKey.restype = wintypes.BOOL
+user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.UnregisterHotKey.restype = wintypes.BOOL
+user32.PeekMessageW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.UINT, wintypes.UINT]
+user32.PeekMessageW.restype = wintypes.BOOL
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = ctypes.c_short
 
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
+# Without this, holding the hotkey down fires WM_HOTKEY on every key repeat,
+# which toggles Bob between listening and sending several times a second.
+MOD_NOREPEAT = 0x4000
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
 WM_KEYDOWN = 0x0100
@@ -301,10 +312,12 @@ class GlobalHotkey:
             self.error = str(exc)
             self._ready.set()
             return
-        if not user32.RegisterHotKey(None, 1, mods, vk):
-            self.error = f"Could not register {self.spec} (already in use?)"
-            self._ready.set()
-            return
+        if not user32.RegisterHotKey(None, 1, mods | MOD_NOREPEAT, vk):
+            # MOD_NOREPEAT needs Windows 7+; retry without it just in case.
+            if not user32.RegisterHotKey(None, 1, mods, vk):
+                self.error = f"Could not register {self.spec} (already in use?)"
+                self._ready.set()
+                return
         self._ready.set()
         msg = MSG()
         try:

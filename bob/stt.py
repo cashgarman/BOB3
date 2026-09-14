@@ -67,7 +67,7 @@ class SpeechToText:
         except Exception as exc:
             raise RuntimeError(f"Failed to load Whisper: {last_error or exc}") from exc
 
-    def transcribe(self, audio: np.ndarray, sample_rate: int) -> str:
+    def transcribe(self, audio: np.ndarray, sample_rate: int, initial_prompt: str = "") -> str:
         if self._model is None:
             raise RuntimeError("Whisper is not loaded")
         if audio.size == 0:
@@ -76,6 +76,10 @@ class SpeechToText:
         peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
         if peak > 1.0:
             pcm = pcm / peak
+        kwargs: dict = {}
+        prompt = (initial_prompt or "").strip()
+        if prompt:
+            kwargs["initial_prompt"] = prompt[-800:]
         segments, _info = self._model.transcribe(
             pcm,
             language="en",
@@ -84,5 +88,6 @@ class SpeechToText:
             without_timestamps=True,
             condition_on_previous_text=False,
             no_speech_threshold=0.6,
+            **kwargs,
         )
         return " ".join(seg.text.strip() for seg in segments).strip()
