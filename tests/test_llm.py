@@ -128,3 +128,95 @@ def test_round_yields_text_when_no_tools():
     assert chunks == ["Hello there."]
     assert content == "Hello there."
     assert not calls
+
+
+def test_round_yields_partial_on_cancel():
+    import threading
+
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:8b", 4096, "You are Bob.", 12)
+    cancel = threading.Event()
+
+    class FakeStream:
+        is_error = False
+
+        def read(self):
+            return b""
+
+        def iter_lines(self):
+            yield json.dumps({"message": {"content": "Hello "}, "done": False})
+            cancel.set()
+            yield json.dumps({"message": {"content": "world."}, "done": True})
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeClient:
+        def stream(self, *args, **kwargs):
+            return FakeStream()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    spoken: list[str] = []
+    chunks: list[str] = []
+    with patch("bob.llm.httpx.Client", return_value=FakeClient()):
+        gen = chat._round("system", None, cancel, spoken)
+        while True:
+            try:
+                chunks.append(next(gen))
+            except StopIteration as exc:
+                content, calls = exc.value
+                break
+    assert chunks == ["Hello "]
+    assert content == "Hello "
+    assert spoken == ["Hello "]
+    assert not calls
+
+
+def test_chat_keeps_partial_history_on_close():
+    import threading
+
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:8b", 4096, "You are Bob.", 12)
+    cancel = threading.Event()
+
+    class FakeStream:
+        is_error = False
+
+        def read(self):
+            return b""
+
+        def iter_lines(self):
+            yield json.dumps({"message": {"content": "Partial answer"}, "done": True})
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeClient:
+        def stream(self, *args, **kwargs):
+            return FakeStream()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    with patch("bob.llm.httpx.Client", return_value=FakeClient()):
+        gen = chat.chat("Weather?", cancel=cancel)
+        chunk = next(gen)
+        assert chunk == "Partial answer"
+        cancel.set()
+        gen.close()
+    assert chat.history[-2]["role"] == "user"
+    assert chat.history[-2]["content"] == "Weather?"
+    assert chat.history[-1]["role"] == "assistant"
+    assert chat.history[-1]["content"] == "Partial answer"

@@ -183,10 +183,27 @@ _FILLERS = {
     "bye.",
     "okay",
     "ok",
+    "all right",
+    "all right.",
+    "alright",
+    "alright.",
     "amen",
     "amen.",
     "subtitles by the amara.org community",
 }
+
+# Short phrases a user may say on purpose; everything else stays filtered.
+_ALLOWED_SHORT_PHRASES = frozenset(
+    {
+        "thank you",
+        "thanks",
+        "bye",
+        "goodbye",
+        "good bye",
+        "ok",
+        "okay",
+    }
+)
 
 _FILLER_WORDS = frozenset(
     {
@@ -196,6 +213,9 @@ _FILLER_WORDS = frozenset(
         "bye",
         "okay",
         "ok",
+        "all",
+        "right",
+        "alright",
         "watching",
         "for",
         "the",
@@ -224,7 +244,41 @@ def _words(text: str) -> list[str]:
     return _WORD_RE.findall((text or "").lower())
 
 
-def _has_phrase_loop(words: list[str], min_repeats: int = 4) -> bool:
+def is_allowed_short_phrase(text: str) -> bool:
+    words = _words(text)
+    if not words or len(words) > 4:
+        return False
+    return " ".join(words) in _ALLOWED_SHORT_PHRASES
+
+
+def _strip_leading_filler_words(words: list[str]) -> list[str]:
+    trimmed = list(words)
+    while trimmed and trimmed[0] in _FILLER_WORDS:
+        trimmed.pop(0)
+    return trimmed
+
+
+def _has_repeated_sentence_loop(raw: str, min_repeats: int = 2) -> bool:
+    sentences = [s.strip() for s in re.split(r"[.!?]+", raw) if s.strip()]
+    if len(sentences) < min_repeats:
+        return False
+    norms = [_words(s) for s in sentences]
+    if len(sentences) >= min_repeats:
+        tail = [" ".join(n) for n in norms[-min_repeats:] if n]
+        if tail and len(set(tail)) == 1:
+            words = norms[-1]
+            if len(words) <= 4 or all(w in _FILLER_WORDS for w in words):
+                return True
+    phrases = [" ".join(n) for n in norms if n]
+    for phrase, count in Counter(phrases).items():
+        if count >= 3 and len(phrase.split()) <= 4:
+            return True
+        if count >= 2 and phrase in {"all right", "alright", "ok", "okay", "you"}:
+            return True
+    return False
+
+
+def _has_phrase_loop(words: list[str], min_repeats: int = 3) -> bool:
     """True when a 1–4 word phrase repeats back-to-back many times."""
     n = len(words)
     if n < min_repeats:
@@ -256,9 +310,18 @@ def is_bad_transcript(text: str, *, allow_short_fillers: bool = False) -> bool:
     words = _words(raw)
     if not words:
         return True
-    if not allow_short_fillers and len(words) <= 4 and all(w in _FILLER_WORDS for w in words):
+    if allow_short_fillers and is_allowed_short_phrase(raw):
+        return False
+    if len(words) <= 4 and all(w in _FILLER_WORDS for w in words):
         return True
-    if _has_phrase_loop(words, min_repeats=4):
+    trimmed = _strip_leading_filler_words(words)
+    if trimmed and trimmed != words:
+        trimmed_text = " ".join(trimmed)
+        if is_bad_transcript(trimmed_text, allow_short_fillers=False):
+            return True
+    if _has_phrase_loop(words, min_repeats=3):
+        return True
+    if _has_repeated_sentence_loop(raw):
         return True
     if len(words) >= 8:
         top, count = Counter(words).most_common(1)[0]
@@ -319,7 +382,7 @@ def _is_hallucination(seg, text: str, *, allow_short_fillers: bool = False) -> b
     lowered = text.lower().strip()
     bare = lowered.rstrip(".!?,;:")
     if bare in _FILLERS or lowered in _FILLERS:
-        if allow_short_fillers:
+        if allow_short_fillers and is_allowed_short_phrase(text):
             return False
         # Stock silence fillers only when Whisper doubts there was speech.
         return no_speech > 0.45

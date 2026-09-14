@@ -152,7 +152,7 @@ def test_assistant_toggle_listen_and_submit_text(ui, tmp_path, monkeypatch):
     assistant._ui = lambda fn: fn()
 
     started = []
-    assistant._start_pipeline = lambda cancel, typed_text=None: started.append(typed_text)
+    assistant._start_pipeline = lambda typed_text=None: started.append(typed_text)
 
     assistant.toggle_listen()
     assert assistant.state == State.LISTENING
@@ -181,9 +181,31 @@ def test_assistant_stop_speaking(ui, tmp_path, monkeypatch):
     assistant.toast = None
     assistant._ui = lambda fn: fn()
     assistant.state = State.SPEAKING
+    assistant._pending_reply = "Partial answer here."
+    assistant._turns = [{"role": "user", "content": "Question?"}]
     assistant.stop_speaking()
     assert assistant.state == State.IDLE
     speech.cancel.assert_called()
+    assert assistant._turns[-1] == {"role": "assistant", "content": "Partial answer here."}
+
+
+def test_assistant_interrupt_listen_preserves_partial_reply(ui, tmp_path, monkeypatch):
+    assistant, audio, stt_stream, speech, llm = _make_assistant(tmp_path, monkeypatch)
+    assistant.overlay = ui
+    assistant.hud = None
+    assistant.toast = None
+    assistant._ui = lambda fn: fn()
+    assistant.state = State.SPEAKING
+    assistant._pending_reply = "The weather today is sunny and"
+    assistant._turns = [{"role": "user", "content": "What's the weather?"}]
+    assistant._last_toggle = 0.0
+    assistant.toggle_listen()
+    assert assistant.state == State.LISTENING
+    assert assistant._turns[-1] == {
+        "role": "assistant",
+        "content": "The weather today is sunny and",
+    }
+    audio.start_listening.assert_called()
 
 
 def test_assistant_new_chat_and_load_session(ui, tmp_path, monkeypatch):

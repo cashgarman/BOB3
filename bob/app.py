@@ -685,6 +685,7 @@ class Assistant:
         def apply() -> None:
             if self.state not in {State.SPEAKING, State.THINKING}:
                 return
+            self._commit_assistant_if_needed(self._pending_reply)
             self._cancel_current_turn()
             self._barge_armed = False
             self.audio.set_capture_muted(False)
@@ -919,11 +920,24 @@ class Assistant:
             self._pending_reply = ""
         self._refresh_talk()
 
+    def _commit_assistant_if_needed(self, text: str) -> bool:
+        """Persist a partial assistant reply when the user interrupts mid-response."""
+        cleaned = strip_mood_tags(text or "").strip()
+        if not cleaned or cleaned in {"…", "..."}:
+            return False
+        if self._turns and self._turns[-1].get("role") == "assistant":
+            if self._turns[-1].get("content") == cleaned:
+                return False
+        self._commit_turn("assistant", cleaned)
+        return True
+
     def _restore_idle_ui(self) -> None:
         if self._overlay_viewable():
             self.overlay.set_phase("idle")
 
     def _begin_listen(self, seed=None) -> None:
+        if self.state in {State.SPEAKING, State.THINKING}:
+            self._commit_assistant_if_needed(self._pending_reply)
         self._cancel_current_turn()
         self.stt_stream.cancel()
         self.audio.set_capture_muted(False)
@@ -954,7 +968,7 @@ class Assistant:
         self._present_talk("reply")
         self._talk_set_reply("…")
         self._set_state(State.THINKING, "transcribing")
-        self._start_pipeline(self._cancel)
+        self._start_pipeline()
 
     def submit_text(self, text: str) -> None:
         """Send a typed message through the same LLM → TTS path as speech."""
@@ -980,14 +994,20 @@ class Assistant:
             self._talk_set_user(text)
             self._talk_set_reply("…")
             self._set_state(State.THINKING, "ollama")
-            self._start_pipeline(self._cancel, typed_text=text)
+            self._start_pipeline(typed_text=text)
 
         self._ui(apply)
 
-    def _start_pipeline(self, cancel: threading.Event, typed_text: str | None = None) -> None:
+    def _start_pipeline(self, typed_text: str | None = None) -> None:
+        if self._pipeline_thread and self._pipeline_thread.is_alive():
+            self._cancel.set()
+            self.speech.cancel()
+            self._pipeline_thread.join(timeout=5.0)
+        self._cancel = threading.Event()
+        token = self._cancel
         self._pipeline_thread = threading.Thread(
             target=self._pipeline,
-            args=(cancel, typed_text),
+            args=(token, typed_text),
             name="pipeline",
             daemon=True,
         )
@@ -1009,7 +1029,10 @@ class Assistant:
             self.audio.set_capture_muted(False)
             self._barge_endpointer.reset()
             self._barge_armed = True
-        self._set_state(State.SPEAKING, "" if self.speech.mood == DEFAULT_MOOD else self.speech.mood)
+        detail = self.settings.hotkey.upper() + " to interrupt"
+        if self.speech.mood != DEFAULT_MOOD:
+            detail = f"{self.speech.mood}  ·  {detail}"
+        self._set_state(State.SPEAKING, detail)
         return epoch
 
     def _reset_turn_mood(self) -> None:
@@ -1026,8 +1049,10 @@ class Assistant:
     def _pipeline(self, cancel: threading.Event | None = None, typed_text: str | None = None) -> None:
         assistant_text = ""
         user_text = ""
+        full = ""
         epoch = 0
         started = False
+        committed_assistant = False
         token = cancel or self._cancel
         self._reset_turn_mood()
         try:
@@ -1105,6 +1130,7 @@ class Assistant:
             assistant_text = strip_mood_tags(full)
             if assistant_text:
                 self._commit_turn("assistant", assistant_text)
+                committed_assistant = True
             if started:
                 if not self.speech.wait(epoch, timeout=120.0):
                     log.warning("Speech playback timed out; cancelling audio")
@@ -1117,6 +1143,10 @@ class Assistant:
             self._barge_armed = False
             self.audio.set_capture_muted(False)
             self._reset_turn_mood()
+            if not committed_assistant:
+                partial = strip_mood_tags(full).strip()
+                if partial and token.is_set() and self._commit_assistant_if_needed(partial):
+                    assistant_text = partial
             if not token.is_set() and self.state != State.LISTENING:
                 self._set_state(State.IDLE, self._ready_detail())
                 self._ui(self._restore_idle_ui)

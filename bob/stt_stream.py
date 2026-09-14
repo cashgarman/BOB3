@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import numpy as np
 
-from bob.stt import SpeechToText, clean_transcript, sanitize_prompt
+from bob.stt import SpeechToText, clean_transcript, is_allowed_short_phrase, sanitize_prompt
 from bob.vad import speech_regions
 
 MAX_PARTIAL_SEC = 15.0
@@ -193,18 +193,41 @@ class StreamingTranscriber:
                     self._chunks[0] = head[remain:]
                     remain = 0
 
-    def _real_speech_turn(self) -> bool:
-        return self._session_peak >= 0.02
+    def _speech_seconds(self, audio: np.ndarray) -> float:
+        if audio.size <= 0:
+            return 0.0
+        regions = speech_regions(
+            audio,
+            sample_rate=self.sample_rate,
+            threshold=self.vad_threshold,
+            min_silence_ms=self.commit_silence_ms,
+        )
+        if not regions:
+            return audio.size / max(self.sample_rate, 1)
+        samples = sum(max(0, int(r["end"]) - int(r["start"])) for r in regions)
+        return samples / max(self.sample_rate, 1)
+
+    def _allow_short_fillers(self, audio: np.ndarray) -> bool:
+        """Relax filters for brief intentional phrases, not long silent recordings."""
+        if self._session_peak < 0.02 or audio.size <= 0:
+            return False
+        return self._speech_seconds(audio) <= 1.5
+
+    def _clean_decode(self, text: str, *, allow_short: bool) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+        if is_allowed_short_phrase(raw):
+            return clean_transcript(raw, allow_short_fillers=True)
+        return clean_transcript(raw, allow_short_fillers=allow_short)
 
     def _decode(
         self,
         audio: np.ndarray,
         prompt: str,
         *,
-        allow_short_fillers: bool | None = None,
+        allow_short_fillers: bool = False,
     ) -> str:
-        if allow_short_fillers is None:
-            allow_short_fillers = self._real_speech_turn()
         min_sec = 0.12 if allow_short_fillers else 0.2
         min_samples = int(self.sample_rate * min_sec)
         if audio.size < min_samples:
@@ -218,7 +241,7 @@ class StreamingTranscriber:
             initial_prompt=use_prompt,
             allow_short_fillers=allow_short_fillers,
         )
-        return clean_transcript(text, allow_short_fillers=allow_short_fillers)
+        return self._clean_decode(text, allow_short=allow_short_fillers)
 
     def _tick(self) -> None:
         buf = self._snapshot()
@@ -253,7 +276,7 @@ class StreamingTranscriber:
                     break
 
             if closed_end > int(self.sample_rate * 0.25):
-                text = self._decode(buf[:closed_end], committed)
+                text = self._decode(buf[:closed_end], committed, allow_short_fillers=False)
                 if text:
                     committed = _join(committed, text)
                     with self._lock:
@@ -266,21 +289,21 @@ class StreamingTranscriber:
                     buf = buf[closed_end:]
 
         if do_final:
-            allow_short = self._real_speech_turn()
-            tail = (
-                self._decode(buf, committed, allow_short_fillers=allow_short)
-                if buf.size
-                else ""
-            )
-            final = clean_transcript(_join(committed, tail), allow_short_fillers=allow_short)
-            if not final and self._session_peak >= 0.003:
-                full = self._full_turn_audio()
-                if full.size >= int(self.sample_rate * 0.12):
-                    retry = self._decode(full, "", allow_short_fillers=allow_short)
-                    final = clean_transcript(
-                        _join(committed, retry),
-                        allow_short_fillers=allow_short,
-                    )
+            full = self._full_turn_audio()
+            allow_short = self._allow_short_fillers(full if full.size else buf)
+            min_samples = int(self.sample_rate * 0.12)
+            primary = ""
+            if full.size >= min_samples:
+                primary = self._decode(full, "", allow_short_fillers=allow_short)
+            if primary:
+                final = self._clean_decode(primary, allow_short=allow_short)
+            else:
+                tail = self._decode(buf, "", allow_short_fillers=allow_short) if buf.size else ""
+                merged = _join(committed, tail)
+                final = self._clean_decode(merged, allow_short=allow_short)
+            if not final and self._session_peak >= 0.003 and full.size >= min_samples:
+                retry = self._decode(full, "", allow_short_fillers=True)
+                final = self._clean_decode(retry, allow_short=True)
             self._final_text = final
             self._active = False
             with self._lock:
@@ -297,7 +320,7 @@ class StreamingTranscriber:
             return
         cap = int(self.sample_rate * MAX_PARTIAL_SEC)
         decode_buf = buf[-cap:] if buf.size > cap else buf
-        partial = self._decode(decode_buf, committed)
+        partial = self._decode(decode_buf, committed, allow_short_fillers=False)
         words = partial.split() if partial else []
         if use_prompt:
             stable = _agree_prefix(self._prev_partial, words)

@@ -241,7 +241,7 @@ class OllamaChat:
                     # Caller stopped consuming (barge-in / hotkey). Keep what was
                     # already said so the next turn knows what Bob got through.
                     partial = "".join(spoken).strip()
-                    if partial:
+                    if partial and not self._history_ends_with_assistant(partial):
                         self.history.append({"role": "assistant", "content": partial})
                     raise
                 if not calls and offered and _is_tool_preamble(content) and on_tool:
@@ -285,6 +285,12 @@ class OllamaChat:
             if msg.get("role") == "user":
                 msg["content"] = spoken
                 return
+
+    def _history_ends_with_assistant(self, content: str) -> bool:
+        if not self.history:
+            return False
+        last = self.history[-1]
+        return last.get("role") == "assistant" and (last.get("content") or "").strip() == content.strip()
 
     def _record_eval(self, data: dict[str, Any]) -> None:
         count = data.get("prompt_eval_count")
@@ -353,15 +359,18 @@ class OllamaChat:
                         self._record_eval(data)
                         break
         content = "".join(parts)
+        cancelled = cancel is not None and cancel.is_set()
         # Hold back tool-round narration and any deferral while tools are offered.
         if not calls and content:
-            if tools and _is_tool_preamble(content):
+            if tools and _is_tool_preamble(content) and not cancelled:
                 return content, calls
             if first_token:
                 self.last_ttft_ms = (time.perf_counter() - t0) * 1000.0
             if spoken is not None:
                 spoken.append(content)
             yield content
+        elif cancelled and content.strip() and spoken is not None:
+            spoken.append(content)
         return content, calls
 
     def _trim(self) -> None:
