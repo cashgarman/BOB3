@@ -43,7 +43,7 @@ class Settings:
     ollama_gpu_overhead: int = 1610612736
     max_history_turns: int = 12
     system_prompt: str = field(default_factory=load_system_prompt)
-    show_overlay: bool = True
+    show_overlay: bool = False
     start_with_windows: bool = False
     input_device: str = ""
     output_device: str = ""

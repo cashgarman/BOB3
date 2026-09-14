@@ -158,13 +158,12 @@ class Assistant:
             self.quit,
             on_submit=self.submit_text,
             on_settings=self.open_settings,
+            visible=self.settings.show_overlay,
         )
         self.overlay.on_hide = lambda: self.set_overlay_visible(False, persist=True)
         self.hud = TalkHud(self.overlay, self.settings.hotkey)
         self.toast = ListenToast(self.overlay, on_click=self.toggle_listen)
         self._refresh_talk()
-        if not self.settings.show_overlay:
-            self.overlay.hide()
         self._start_tray()
         self.overlay.after(80, self._boot)
         self.overlay.after(50, self._poll_level)
@@ -883,15 +882,16 @@ class Assistant:
 
     def _present_talk(self, phase: str) -> None:
         def apply() -> None:
-            iconic = False
-            try:
-                iconic = bool(self.overlay) and self.overlay.state() == "iconic"
-            except Exception:
+            if self.settings.show_overlay:
                 iconic = False
-            # Iconified Tk roots also hide Toplevels on Windows, so restore the overlay.
-            if self._overlay_viewable() or iconic:
-                self.overlay.set_phase(phase)
-                self.overlay.present()
+                try:
+                    iconic = bool(self.overlay) and self.overlay.state() == "iconic"
+                except Exception:
+                    iconic = False
+                # Iconified Tk roots also hide Toplevels on Windows, so restore the overlay.
+                if self._overlay_viewable() or iconic:
+                    self.overlay.set_phase(phase)
+                    self.overlay.present()
             if self.hud:
                 self.hud.hide()
 

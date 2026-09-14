@@ -18,6 +18,8 @@ class Overlay(ctk.CTk):
         on_quit: Callable[[], None],
         on_submit: Callable[[str], None] | None = None,
         on_settings: Callable[[], None] | None = None,
+        *,
+        visible: bool = True,
     ) -> None:
         theme = theming.current()
         ctk.set_appearance_mode(theme.appearance)
@@ -96,6 +98,9 @@ class Overlay(ctk.CTk):
             **theme.button(),
         )
         self.send_btn.pack(side="right", padx=(8, 0))
+
+        if not visible:
+            self.withdraw()
 
     def _open_settings(self) -> None:
         if self.on_settings:

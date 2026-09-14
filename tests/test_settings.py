@@ -10,7 +10,7 @@ def test_settings_defaults():
     assert s.llm_model == "qwen3:4b"
     assert s.stt_model == "parakeet-tdt-0.6b-v3"
     assert s.hotkey == "ctrl+shift+space"
-    assert s.show_overlay is True
+    assert s.show_overlay is False
     assert s.tools_enabled is True
     assert s.auto_endpoint is True
     assert s.theme == "midnight"

@@ -26,12 +26,12 @@ def _vbs_path() -> Path:
 
 
 def write_launcher() -> Path:
-    pythonw = _pythonw()
+    run_ps1 = ROOT / "run.ps1"
     vbs = _vbs_path()
     script = (
         'Set sh = CreateObject("WScript.Shell")\r\n'
         f'sh.CurrentDirectory = "{ROOT}"\r\n'
-        f'sh.Run """{pythonw}"" -m bob", 0, False\r\n'
+        f'sh.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""{run_ps1}""", 0, False\r\n'
     )
     vbs.write_text(script, encoding="utf-8")
     return vbs

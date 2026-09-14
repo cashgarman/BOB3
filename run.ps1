@@ -27,6 +27,9 @@ if ($args -contains "--check") {
     exit $LASTEXITCODE
 }
 
+. (Join-Path $PSScriptRoot "stop_bob.ps1")
+Stop-BobInstances -ProjectRoot $PSScriptRoot | Out-Null
+
 $bob = Join-Path $PSScriptRoot ".venv\Scripts\Bob.exe"
 $pythonw = Join-Path $PSScriptRoot ".venv\Scripts\pythonw.exe"
 if (Test-Path $bob) { $pythonw = $bob }
