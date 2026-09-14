@@ -1,0 +1,16 @@
+.venv/
+venv/
+models/
+data/
+bob_startup.vbs
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.log
+.python-version
+.DS_Store
+Thumbs.db

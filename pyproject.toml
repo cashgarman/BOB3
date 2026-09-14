@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bob"
+version = "0.1.0"
+description = "Local GPU speech-to-speech desktop assistant"
+requires-python = ">=3.12,<3.13"
+readme = "README.md"
+
+[tool.setuptools.packages.find]
+include = ["bob*"]
