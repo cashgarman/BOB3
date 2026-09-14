@@ -4,7 +4,7 @@ import customtkinter as ctk
 
 from bob.state import State
 from bob.ui import theme as theming
-from tests.helpers import pump, transcript_text
+from tests.helpers import find_widget, pump, transcript_text
 
 
 def test_overlay_initial_state(ui):
@@ -120,3 +120,10 @@ def test_overlay_ui_schedules_callback(ui):
     ui.ui(lambda: seen.append("ok"))
     pump(ui)
     assert seen == ["ok"]
+
+
+def test_overlay_settings_button(ui):
+    opened = []
+    ui.on_settings = lambda: opened.append(True)
+    find_widget(ui, ctk.CTkButton, text="⚙").invoke()
+    assert opened == [True]

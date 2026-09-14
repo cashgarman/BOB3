@@ -236,6 +236,10 @@ def test_assistant_apply_setting_live_fields(ui, tmp_path, monkeypatch):
         assistant.apply_setting("stt_model", "small")
         assert assistant.settings.stt_model == "small"
 
+        assistant.apply_setting("hotkey", "ctrl+shift+alt+f5")
+        assert assistant.settings.hotkey == "ctrl+shift+alt+f5"
+        assistant._restart_hotkey.assert_called()
+
 
 def test_assistant_apply_settings_dict_theme(ui, tmp_path, monkeypatch):
     assistant, *_ = _make_assistant(tmp_path, monkeypatch)

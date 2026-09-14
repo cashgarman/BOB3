@@ -14,6 +14,7 @@ PARAKEET_ALIASES = {
     "nemo-parakeet-tdt-0.6b-v3",
 }
 PARAKEET_MODEL = "nemo-parakeet-tdt-0.6b-v3"
+PARAKEET_HF_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx"
 
 
 def is_parakeet(name: str) -> bool:
@@ -39,9 +40,15 @@ class ParakeetSTT:
 
         add_cuda_dll_dirs()
         preload_onnxruntime()
-        import onnx_asr
+        try:
+            import onnx_asr
+        except ImportError as exc:
+            raise RuntimeError(
+                "Parakeet STT needs the onnx-asr package. "
+                "Install with: pip install onnx-asr"
+            ) from exc
 
-        self.download_root.mkdir(parents=True, exist_ok=True)
+        model_dir = self._ensure_model_files()
         last_error: Exception | None = None
         for providers, device, q in (
             (["CUDAExecutionProvider", "CPUExecutionProvider"], "cuda", None),
@@ -54,7 +61,7 @@ class ParakeetSTT:
                     kwargs["quantization"] = q
                 self._model = onnx_asr.load_model(
                     PARAKEET_MODEL,
-                    str(self.download_root),
+                    str(model_dir),
                     **kwargs,
                 )
                 self.device = device
@@ -70,22 +77,37 @@ class ParakeetSTT:
                 self._model = None
         raise RuntimeError(f"Failed to load Parakeet: {last_error}") from last_error
 
+    def _ensure_model_files(self) -> Path:
+        """Download Parakeet ONNX weights into models/parakeet if missing.
+
+        onnx-asr treats an existing empty local_dir as offline and will not
+        fetch from Hugging Face, so we populate the folder ourselves first.
+        """
+        self.download_root.mkdir(parents=True, exist_ok=True)
+        if (self.download_root / "config.json").is_file():
+            return self.download_root
+        from huggingface_hub import snapshot_download
+
+        log.info("Downloading Parakeet model from %s …", PARAKEET_HF_REPO)
+        snapshot_download(PARAKEET_HF_REPO, local_dir=str(self.download_root))
+        return self.download_root
+
     def transcribe(self, audio: np.ndarray, sample_rate: int, initial_prompt: str = "") -> str:
         if self._model is None:
             raise RuntimeError("Parakeet is not loaded")
         if audio.size == 0:
             return ""
-        pcm = np.ascontiguousarray(audio, dtype=np.float32).reshape(-1)
-        peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
-        if peak > 1.0:
-            pcm = pcm / peak
+        from bob.stt import clean_transcript, prepare_pcm
+
+        pcm, _, _, ok = prepare_pcm(audio)
+        if not ok:
+            return ""
         try:
             result = self._model.recognize(pcm, sample_rate=int(sample_rate))
         except TypeError:
             result = self._model.recognize(pcm)
-        from bob.stt import clean_transcript
-
-        return clean_transcript(_result_text(result))
+        raw = _result_text(result)
+        return clean_transcript(raw)
 
 
 def _result_text(result) -> str:

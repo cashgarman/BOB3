@@ -8,9 +8,32 @@ import numpy as np
 
 STT_FALLBACKS = ("large-v3-turbo", "distil-large-v3", "medium", "small")
 
-# Near-silence: quieter than this and Whisper invents "you you you…".
-_MIN_RMS = 0.006
-_MIN_PEAK = 0.02
+# Near-silence gate (after normalization). Pre-fix logs had noise peaks ~0.044.
+_SILENCE_PEAK = 0.003
+_TARGET_PEAK = 0.75
+_MAX_GAIN = 12.0
+
+
+def prepare_pcm(audio: np.ndarray) -> tuple[np.ndarray, float, float, bool]:
+    """Normalize quiet mic input; return ok_to_decode=False for true silence."""
+    pcm = np.ascontiguousarray(audio, dtype=np.float32).reshape(-1)
+    if pcm.size == 0:
+        return pcm, 0.0, 0.0, False
+    peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
+    rms = float(np.sqrt(np.mean(np.square(pcm)))) if pcm.size else 0.0
+    peak_raw = peak
+    if peak > 1.0:
+        pcm = pcm / peak
+        peak = 1.0
+        peak_raw = peak
+    if peak < _SILENCE_PEAK:
+        return pcm, peak_raw, rms, False
+    if peak < 0.25:
+        gain = min(_MAX_GAIN, _TARGET_PEAK / max(peak, 1e-6))
+        pcm = np.clip(pcm * gain, -1.0, 1.0).astype(np.float32, copy=False)
+        peak = float(np.max(np.abs(pcm)))
+        rms = float(np.sqrt(np.mean(np.square(pcm))))
+    return pcm, peak_raw, rms, True
 
 
 def create_speech_to_text(model_name: str, compute_type: str, models_dir: Path):
@@ -18,6 +41,11 @@ def create_speech_to_text(model_name: str, compute_type: str, models_dir: Path):
     from bob.stt_parakeet import ParakeetSTT, is_parakeet
 
     if is_parakeet(model_name):
+        try:
+            import onnx_asr  # noqa: F401
+        except ImportError:
+            # Missing dep should not brick boot — fall back to Whisper.
+            return SpeechToText("large-v3-turbo", compute_type, models_dir / "whisper")
         return ParakeetSTT(model_name, models_dir / "parakeet")
     return SpeechToText(model_name, compute_type, models_dir / "whisper")
 
@@ -92,15 +120,8 @@ class SpeechToText:
     def transcribe(self, audio: np.ndarray, sample_rate: int, initial_prompt: str = "") -> str:
         if self._model is None:
             raise RuntimeError("Whisper is not loaded")
-        if audio.size == 0:
-            return ""
-        pcm = np.ascontiguousarray(audio, dtype=np.float32).reshape(-1)
-        peak = float(np.max(np.abs(pcm))) if pcm.size else 0.0
-        if peak > 1.0:
-            pcm = pcm / peak
-            peak = 1.0
-        rms = float(np.sqrt(np.mean(np.square(pcm)))) if pcm.size else 0.0
-        if rms < _MIN_RMS and peak < _MIN_PEAK:
+        pcm, _, _, ok = prepare_pcm(audio)
+        if not ok:
             return ""
         kwargs: dict = {}
         prompt = sanitize_prompt(initial_prompt)
@@ -109,7 +130,7 @@ class SpeechToText:
         segments, _info = self._model.transcribe(
             pcm,
             language="en",
-            vad_filter=False,
+            vad_filter=True,
             beam_size=1,
             without_timestamps=True,
             condition_on_previous_text=False,
@@ -153,6 +174,8 @@ _FILLERS = {
     "bye.",
     "okay",
     "ok",
+    "amen",
+    "amen.",
     "subtitles by the amara.org community",
 }
 
@@ -175,6 +198,7 @@ _FILLER_WORDS = frozenset(
         "yeah",
         "yes",
         "hmm",
+        "amen",
         "subtitle",
         "subtitles",
         "amara",
@@ -216,16 +240,14 @@ def _has_phrase_loop(words: list[str], min_repeats: int = 4) -> bool:
 
 
 def is_bad_transcript(text: str) -> bool:
-    """Detect Whisper silence hallucinations and token-loop garbage.
-
-    Single stock phrases like "Thank you." are *not* rejected here — those need
-    segment no_speech scores (see _is_hallucination). Loops always are.
-    """
+    """Detect Whisper silence hallucinations and token-loop garbage."""
     raw = (text or "").strip()
     if not raw:
         return True
     words = _words(raw)
     if not words:
+        return True
+    if len(words) <= 4 and all(w in _FILLER_WORDS for w in words):
         return True
     if _has_phrase_loop(words, min_repeats=4):
         return True
@@ -236,8 +258,15 @@ def is_bad_transcript(text: str) -> bool:
         unique = set(words)
         if len(unique) <= 3 and all(w in _FILLER_WORDS for w in unique):
             return True
-    # "Thank you. Thank you. Thank you."
     sentences = [s.strip() for s in re.split(r"[.!?]+", raw) if s.strip()]
+    if len(sentences) >= 2:
+        norms = [_words(s) for s in sentences]
+        if norms and all(n == norms[0] and n for n in norms):
+            phrase = " ".join(norms[0])
+            if phrase in {f.rstrip(".!?") for f in _FILLERS} or all(
+                w in _FILLER_WORDS for w in norms[0]
+            ):
+                return True
     if len(sentences) >= 3:
         norms = [_words(s) for s in sentences]
         if norms and all(n == norms[0] and n for n in norms):

@@ -18,6 +18,7 @@ class Overlay(ctk.CTk):
         on_toggle: Callable[[], None],
         on_quit: Callable[[], None],
         on_submit: Callable[[str], None] | None = None,
+        on_settings: Callable[[], None] | None = None,
     ) -> None:
         theme = theming.current()
         ctk.set_appearance_mode(theme.appearance)
@@ -26,6 +27,7 @@ class Overlay(ctk.CTk):
         self.on_toggle = on_toggle
         self.on_quit = on_quit
         self.on_submit = on_submit
+        self.on_settings = on_settings
         self.on_hide = None
         self._messages: list[dict] = []
         self._pending_user = ""
@@ -42,16 +44,33 @@ class Overlay(ctk.CTk):
         self.configure(**theme.window())
         self.protocol("WM_DELETE_WINDOW", self.hide)
 
+        header = ctk.CTkFrame(self, fg_color="transparent")
+        header.pack(fill="x", padx=16, pady=(14, 2))
+
         self.status = set_role(
             ctk.CTkLabel(
-                self,
+                header,
                 text="LOADING",
                 font=theme.font(18, "bold"),
                 text_color=theme.state_color(State.LOADING),
             ),
             "status",
         )
-        self.status.pack(anchor="w", padx=16, pady=(14, 2))
+        self.status.pack(side="left", anchor="w")
+
+        self.settings_btn = set_role(
+            ctk.CTkButton(
+                header,
+                text="⚙",
+                width=32,
+                height=32,
+                font=theme.font(18),
+                command=self._open_settings,
+                **theme.button("surface_off"),
+            ),
+            "surface_off",
+        )
+        self.settings_btn.pack(side="right")
 
         self.meta = set_role(
             ctk.CTkLabel(
@@ -91,6 +110,10 @@ class Overlay(ctk.CTk):
             **theme.button(),
         )
         self.send_btn.pack(side="right", padx=(8, 0))
+
+    def _open_settings(self) -> None:
+        if self.on_settings:
+            self.on_settings()
 
     def _submit_typed(self, _event=None) -> None:  # noqa: ANN001
         text = (self.composer.get() or "").strip()

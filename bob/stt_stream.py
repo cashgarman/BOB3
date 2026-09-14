@@ -57,6 +57,8 @@ class StreamingTranscriber:
         self._finalize_done.set()
         self._final_text = ""
         self._worker: threading.Thread | None = None
+        self._session_peak = 0.0
+        self._turn_chunks: list[np.ndarray] = []
 
     def configure(
         self,
@@ -100,6 +102,8 @@ class StreamingTranscriber:
             self._prev_partial = []
             self._final_text = ""
             self._active = True
+            self._session_peak = 0.0
+            self._turn_chunks = []
             self._finalize_req.clear()
             self._finalize_done.clear()
         self._dirty.set()
@@ -110,8 +114,12 @@ class StreamingTranscriber:
         pcm = np.ascontiguousarray(chunk, dtype=np.float32).reshape(-1)
         if pcm.size == 0:
             return
+        chunk_peak = float(np.max(np.abs(pcm)))
         with self._lock:
+            if chunk_peak > self._session_peak:
+                self._session_peak = chunk_peak
             self._chunks.append(pcm)
+            self._turn_chunks.append(pcm.copy())
             self._total_samples += pcm.size
         self._dirty.set()
 
@@ -129,6 +137,7 @@ class StreamingTranscriber:
         self._finalize_done.set()
         with self._lock:
             self._chunks = []
+            self._turn_chunks = []
 
     @property
     def total_samples(self) -> int:
@@ -158,6 +167,12 @@ class StreamingTranscriber:
                     self._finalize_req.clear()
                     self._finalize_done.set()
 
+    def _full_turn_audio(self) -> np.ndarray:
+        with self._lock:
+            if not self._turn_chunks:
+                return np.zeros(0, dtype=np.float32)
+            return np.concatenate(self._turn_chunks)
+
     def _snapshot(self) -> np.ndarray:
         with self._lock:
             if not self._chunks:
@@ -181,15 +196,6 @@ class StreamingTranscriber:
     def _decode(self, audio: np.ndarray, prompt: str) -> str:
         min_samples = int(self.sample_rate * 0.2)
         if audio.size < min_samples:
-            return ""
-        # Skip Whisper on pure silence/noise — it invents "you you you…".
-        regions = speech_regions(
-            audio,
-            sample_rate=self.sample_rate,
-            threshold=self.vad_threshold,
-            min_silence_ms=self.commit_silence_ms,
-        )
-        if not regions:
             return ""
         use_prompt = ""
         if getattr(self.stt, "supports_prompt", False):
@@ -238,16 +244,23 @@ class StreamingTranscriber:
                         self._display_tail = ""
                     if self.on_partial and committed:
                         self.on_partial(committed)
-                self._drop_prefix(closed_end)
-                self._prev_partial = []
-                buf = buf[closed_end:]
+                    self._drop_prefix(closed_end)
+                    self._prev_partial = []
+                    buf = buf[closed_end:]
 
         if do_final:
             tail = self._decode(buf, committed) if buf.size else ""
-            self._final_text = clean_transcript(_join(committed, tail))
+            final = clean_transcript(_join(committed, tail))
+            if not final and self._session_peak >= 0.003:
+                full = self._full_turn_audio()
+                if full.size >= int(self.sample_rate * 0.25):
+                    retry = self._decode(full, "")
+                    final = clean_transcript(_join(committed, retry))
+            self._final_text = final
             self._active = False
             with self._lock:
                 self._chunks = []
+                self._turn_chunks = []
                 self._committed = self._final_text
                 self._display_tail = ""
             self._finalize_req.clear()

@@ -12,6 +12,44 @@ import httpx
 log = logging.getLogger(__name__)
 
 LARGE_MODEL_BYTES = 6 * 1024 * 1024 * 1024
+
+
+def _ollama_error(exc: Exception, model: str) -> str:
+    """Turn httpx/Ollama failures into something a user can act on."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return _ollama_error_body(exc.response.text, model) or str(exc)
+    if isinstance(exc, RuntimeError):
+        text = str(exc)
+        parsed = _ollama_error_body(text, model)
+        if parsed:
+            return parsed
+    return str(exc)
+
+
+def _ollama_error_body(raw: str, model: str) -> str | None:
+    msg: str | None = None
+    if raw.strip():
+        try:
+            body = json.loads(raw)
+        except json.JSONDecodeError:
+            body = raw.strip()
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message")
+            elif isinstance(err, str):
+                msg = err
+        elif isinstance(body, str):
+            msg = body
+    if isinstance(msg, str) and msg.strip():
+        text = msg.strip()
+        if "not found" in text.lower():
+            return (
+                f"Ollama model '{model}' is not installed ({text}). "
+                f"Run: ollama pull {model} — or pick another model in Bob's tray menu."
+            )
+        return text
+    return None
 # Streaming replies: never hang forever on a dead socket, but allow a slow
 # first token while Ollama pages the model in.
 STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
@@ -103,7 +141,10 @@ class OllamaChat:
             payload["tools"] = tools
         with httpx.Client(timeout=180.0) as client:
             r = client.post(f"{self.host}/api/chat", json=payload)
-            r.raise_for_status()
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(_ollama_error(exc, self.model)) from exc
 
     def reset(self) -> None:
         self.history.clear()
@@ -126,7 +167,10 @@ class OllamaChat:
         self._apply_think(payload)
         with httpx.Client(timeout=120.0) as client:
             r = client.post(f"{self.host}/api/chat", json=payload)
-            r.raise_for_status()
+            try:
+                r.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(_ollama_error(exc, self.model)) from exc
             return ((r.json().get("message") or {}).get("content") or "").strip()
 
     def chat(
@@ -233,7 +277,10 @@ class OllamaChat:
         t0 = time.perf_counter()
         with httpx.Client(timeout=STREAM_TIMEOUT) as client:
             with client.stream("POST", f"{self.host}/api/chat", json=payload) as resp:
-                resp.raise_for_status()
+                if resp.is_error:
+                    detail = resp.read().decode("utf-8", errors="replace")
+                    parsed = _ollama_error_body(detail, self.model)
+                    raise RuntimeError(parsed or f"Ollama HTTP {resp.status_code}")
                 for line in resp.iter_lines():
                     if cancel is not None and cancel.is_set():
                         break

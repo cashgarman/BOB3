@@ -68,6 +68,8 @@ class Settings:
         known = {f.name for f in fields(self)}
         for key, value in kwargs.items():
             if key in known:
+                if key == "hotkey":
+                    value = str(value or "").strip().lower()
                 setattr(self, key, value)
         self.save()
 
@@ -100,6 +102,8 @@ def load_settings(path: Path = CONFIG_PATH) -> Settings:
         from bob.voice_mood import resolve_mood
 
         coerced["tts_mood"] = resolve_mood(coerced.get("tts_mood"))
+    if "hotkey" in coerced:
+        coerced["hotkey"] = str(coerced.get("hotkey") or "").strip().lower()
     if "turn_detector" in coerced:
         mode = str(coerced.get("turn_detector") or "smart_turn").strip().lower()
         coerced["turn_detector"] = mode if mode in {"smart_turn", "silence"} else "smart_turn"

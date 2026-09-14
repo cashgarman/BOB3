@@ -84,6 +84,7 @@ class EndpointState:
     heard_speech: bool
     speech_ms: float
     silence_ms: float
+    turn_speech_ms: float = 0.0
 
 
 class Endpointer:
@@ -115,6 +116,7 @@ class Endpointer:
         self._silence_samples = 0
         self._speech_start = 0
         self._neg = max(self.threshold - 0.15, 0.01)
+        self._turn_speech_samples = 0
 
     def configure(self, threshold: float | None = None, min_silence_ms: int | None = None) -> None:
         if threshold is not None:
@@ -134,6 +136,7 @@ class Endpointer:
         if not probs:
             if self._in_speech:
                 self._speech_samples += pcm.size
+                self._turn_speech_samples += pcm.size
                 self._silence_samples = 0
             elif self._heard:
                 self._silence_samples += pcm.size
@@ -146,6 +149,7 @@ class Endpointer:
                     self._speech_samples = 0
                 else:
                     self._speech_samples += WINDOW
+                    self._turn_speech_samples += WINDOW
                     self._silence_samples = 0
                     self._heard = True
             else:
@@ -153,6 +157,7 @@ class Endpointer:
                     self._in_speech = True
                     self._heard = True
                     self._speech_samples = WINDOW
+                    self._turn_speech_samples += WINDOW
                     self._silence_samples = 0
                     self._speech_start = max(0, self._samples - WINDOW)
                 elif self._heard:
@@ -167,6 +172,7 @@ class Endpointer:
             heard_speech=self._heard,
             speech_ms=1000.0 * self._speech_samples / sr,
             silence_ms=1000.0 * self._silence_samples / sr,
+            turn_speech_ms=1000.0 * self._turn_speech_samples / sr,
         )
 
     def recent_audio(self, seconds: float = 8.0) -> np.ndarray:

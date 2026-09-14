@@ -48,6 +48,8 @@ MODELS_CACHE_SEC = 20.0
 _LOAD_TOAST = {
     "Ollama": "Checking Ollama…",
     "Speech recognition": "Loading speech recognition…",
+    "Speech-to-text": "Loading speech-to-text…",
+    "Whisper CUDA": "Loading Whisper (CUDA)…",
     "Kokoro TTS": "Loading Kokoro TTS…",
     "Turn detection": "Loading turn detector…",
     "Wake word": "Loading wake-word model…",
@@ -154,6 +156,7 @@ class Assistant:
             self.toggle_listen,
             self.quit,
             on_submit=self.submit_text,
+            on_settings=self.open_settings,
         )
         self.overlay.on_hide = lambda: self.set_overlay_visible(False, persist=True)
         self.hud = TalkHud(self.overlay, self.settings.hotkey)
@@ -196,9 +199,34 @@ class Assistant:
                         "Models → Reconnect Ollama in the tray."
                     )
                 )
-            status("Whisper CUDA")
-            self.stt.load()
-            log.info("Whisper %s on %s (%s)", self.stt.model_name, self.stt.device, self.stt.compute_type)
+            status("Speech recognition")
+            try:
+                self.stt.load()
+            except Exception as exc:
+                from bob.stt_parakeet import is_parakeet
+
+                if not is_parakeet(self.settings.stt_model):
+                    raise
+                log.warning("Parakeet failed (%s); falling back to Whisper large-v3-turbo", exc)
+                self._toast_load(
+                    "Parakeet unavailable — using Whisper instead.",
+                    title="Bob",
+                )
+                from bob.stt import SpeechToText
+
+                self.stt = SpeechToText(
+                    "large-v3-turbo",
+                    self.settings.stt_compute_type,
+                    MODELS_DIR / "whisper",
+                )
+                self.stt_stream.stt = self.stt
+                self.stt.load()
+            log.info(
+                "STT %s on %s (%s)",
+                self.stt.model_name,
+                self.stt.device,
+                self.stt.compute_type,
+            )
             status("Kokoro TTS")
             self.tts.load(on_status=status)
             status("Wake word")
@@ -415,6 +443,10 @@ class Assistant:
             self._reload_wake_word(str(value))
         elif field == "hotkey":
             self._restart_hotkey()
+            if self.hud:
+                self.hud.set_hotkey(str(value))
+            if self.overlay:
+                self.overlay.set_meta(self._ready_detail())
         elif field in {"input_device", "output_device"}:
             self._restart_audio()
         elif field == "show_overlay":
@@ -489,7 +521,9 @@ class Assistant:
                 list_devices("input"),
                 list_devices("output"),
                 on_recording=self._set_hotkey_recording,
+                on_hotkey_changed=lambda spec: self.apply_setting("hotkey", spec),
                 on_open_theme=self.open_theme,
+                on_close=lambda: setattr(self, "_settings_win", None),
             )
 
         self._ui(show)
@@ -789,8 +823,12 @@ class Assistant:
             self.settings.auto_endpoint
             and self._endpoint_armed
             and ep.heard_speech
+            and ep.turn_speech_ms >= float(self._listen_endpointer.min_speech_ms)
             and ep.silence_ms >= float(self.settings.endpoint_silence_ms)
         ):
+            partial = self.stt_stream.current_text.strip()
+            if not partial:
+                return
             self._endpoint_armed = False
             self._ui(self._finish_listen)
 

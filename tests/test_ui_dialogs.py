@@ -83,6 +83,7 @@ def test_settings_dialog_rejects_out_of_range(ui):
 def test_settings_dialog_hotkey_capture(ui):
     settings = Settings()
     recording = []
+    saved_hotkeys = []
     dialog = SettingsDialog(
         ui,
         settings,
@@ -91,6 +92,7 @@ def test_settings_dialog_hotkey_capture(ui):
         inputs=[],
         outputs=[],
         on_recording=recording.append,
+        on_hotkey_changed=saved_hotkeys.append,
     )
     pump(ui)
     with patch("bob.ui.settings_dialog.HotkeyRecorder", ImmediateRecorder):
@@ -102,6 +104,7 @@ def test_settings_dialog_hotkey_capture(ui):
         dialog._recorder.callback("alt+f")
         pump(ui)
         assert dialog.vars["hotkey"].get() == "alt+f"
+        assert saved_hotkeys == ["alt+f"]
         assert recording[-1] is False
     dialog.destroy()
 

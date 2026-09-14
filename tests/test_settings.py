@@ -42,6 +42,16 @@ def test_settings_update_persists(tmp_path: Path):
     assert reloaded.show_overlay is False
 
 
+def test_settings_update_normalizes_hotkey(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    s = Settings()
+    s.save(path)
+    s.update(hotkey=" CTRL+Shift+Alt+F5 ")
+    s.save(path)
+    reloaded = load_settings(path)
+    assert reloaded.hotkey == "ctrl+shift+alt+f5"
+
+
 def test_load_settings_migrates_max_silence(tmp_path: Path):
     path = tmp_path / "config.yaml"
     path.write_text("max_silence_sec: 1.5\nllm_model: qwen2.5:latest\n", encoding="utf-8")

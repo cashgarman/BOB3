@@ -10,7 +10,13 @@ from bob.ui import theme as theming
 from bob.ui.theme import PRESET_KEYS, Theme, key_for_label, labels_for, preset, set_role
 from bob.voice_mood import MOOD_NAMES as MOODS
 
-STT_MODELS = ("large-v3-turbo", "distil-large-v3", "medium", "small")
+STT_MODELS = (
+    "parakeet-tdt-0.6b-v3",
+    "large-v3-turbo",
+    "distil-large-v3",
+    "medium",
+    "small",
+)
 COMPUTE = ("int8_float16", "int8", "float16")
 WAKE_WORDS = ("hey_jarvis", "hey_mycroft", "alexa", "hey_rhasspy")
 VOICES = (
@@ -37,7 +43,9 @@ class SettingsDialog(ctk.CTkToplevel):
         inputs: list[str],
         outputs: list[str],
         on_recording: Callable[[bool], None] | None = None,
+        on_hotkey_changed: Callable[[str], None] | None = None,
         on_open_theme: Callable[[], None] | None = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master)
         theme = theming.current()
@@ -51,7 +59,9 @@ class SettingsDialog(ctk.CTkToplevel):
         self.settings = settings
         self.on_save = on_save
         self.on_recording = on_recording
+        self.on_hotkey_changed = on_hotkey_changed
         self.on_open_theme = on_open_theme
+        self.on_close = on_close
         self.vars: dict[str, ctk.StringVar | ctk.BooleanVar] = {}
         self._recorder: HotkeyRecorder | None = None
         self._recording = False
@@ -161,7 +171,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._hotkey_hint = set_role(
             ctk.CTkLabel(
                 parent,
-                text="Click, then press any key combination. The next key is stored.",
+                text="Click, then press a key combination. It saves immediately.",
                 anchor="w",
                 font=theme.font(12),
                 **theme.label_style(muted=True),
@@ -190,14 +200,18 @@ class SettingsDialog(ctk.CTkToplevel):
             recorder.stop()
         if spec:
             self.vars["hotkey"].set(spec)
+            if self.on_hotkey_changed:
+                self.on_hotkey_changed(spec)
         if self._hotkey_btn.winfo_exists():
             self._hotkey_btn.configure(text=str(self.vars["hotkey"].get()).upper())
-            self._hotkey_hint.configure(text="Click, then press any key combination. The next key is stored.")
+            self._hotkey_hint.configure(text="Click, then press a key combination. It saves immediately.")
         if self.on_recording:
             self.on_recording(False)
 
     def _close(self) -> None:
         self._finish_hotkey_capture(None)
+        if self.on_close:
+            self.on_close()
         self.destroy()
 
     def _entry(self, parent, label: str, key: str) -> None:
@@ -274,6 +288,8 @@ class SettingsDialog(ctk.CTkToplevel):
             return
         self._finish_hotkey_capture(None)
         self.on_save(typed)
+        if self.on_close:
+            self.on_close()
         self.destroy()
 
 
