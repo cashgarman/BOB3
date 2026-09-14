@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 
-from PIL import Image, ImageDraw
+from PIL import Image
 import pystray
 
+from bob.state import State
 from bob.ui.settings_dialog import COMPUTE, STT_MODELS, VOICES, WAKE_WORDS
 from bob.ui.theme import PRESET_KEYS, PRESETS
+from bob.ui.tray_icon import (
+    ACCENT,
+    animation_frames,
+    frame_interval_ms,
+    render_icon,
+    tray_title,
+    uses_animation,
+)
 from bob.voice_mood import MOOD_NAMES
 
 
@@ -18,21 +28,108 @@ def _icon_image() -> Image.Image:
         img = Image.open(path)
         img.load()
         return img.convert("RGBA")
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.ellipse((4, 4, 60, 60), fill=(17, 19, 24, 255), outline=(52, 211, 153, 255), width=4)
-    draw.ellipse((24, 22, 40, 42), fill=(52, 211, 153, 255))
-    draw.rectangle((30, 40, 34, 52), fill=(52, 211, 153, 255))
-    return img
+    return render_icon(State.IDLE)
 
 
 class Tray:
     def __init__(self, app) -> None:
         self.app = app
-        self.icon = pystray.Icon("bob", _icon_image(), "Bob", self._menu())
+        self._state = State.LOADING
+        self._detail = ""
+        self._anim_frames: list[Image.Image] = animation_frames(State.LOADING)
+        self._anim_index = 0
+        self._anim_after_id: str | None = None
+        self._lock = threading.Lock()
+        self.icon = pystray.Icon(
+            "bob",
+            render_icon(State.LOADING, 0),
+            tray_title(State.LOADING),
+            self._menu(),
+        )
 
     def _settings(self):
         return self.app.settings
+
+    def _schedule(self, fn: Callable[[], None]) -> None:
+        overlay = getattr(self.app, "overlay", None)
+        if overlay is None:
+            fn()
+            return
+        try:
+            overlay.after(0, fn)
+        except Exception:
+            fn()
+
+    def _cancel_animation_timer(self) -> None:
+        overlay = getattr(self.app, "overlay", None)
+        if overlay is None or self._anim_after_id is None:
+            self._anim_after_id = None
+            return
+        try:
+            overlay.after_cancel(self._anim_after_id)
+        except Exception:
+            pass
+        self._anim_after_id = None
+
+    def _apply_icon(self, image: Image.Image, title: str) -> None:
+        try:
+            self.icon.title = title
+            self.icon.icon = image
+        except Exception:
+            pass
+
+    def _animation_tick(self) -> None:
+        with self._lock:
+            if not uses_animation(self._state):
+                self._anim_after_id = None
+                return
+            self._anim_index = (self._anim_index + 1) % max(1, len(self._anim_frames))
+            image = self._anim_frames[self._anim_index]
+            title = tray_title(self._state, self._detail)
+            state = self._state
+            interval = frame_interval_ms(state)
+
+        self._apply_icon(image, title)
+
+        overlay = getattr(self.app, "overlay", None)
+        if overlay is None or not uses_animation(state):
+            return
+
+        def schedule_next() -> None:
+            with self._lock:
+                if self._state is not state or not uses_animation(self._state):
+                    self._anim_after_id = None
+                    return
+                self._anim_after_id = overlay.after(interval, self._animation_tick)
+
+        self._schedule(schedule_next)
+
+    def set_state(self, state: State, detail: str = "") -> None:
+        with self._lock:
+            self._state = state
+            self._detail = detail or ""
+            self._cancel_animation_timer()
+            title = tray_title(state, self._detail)
+
+            if uses_animation(state):
+                self._anim_frames = animation_frames(state)
+                self._anim_index = 0
+                image = self._anim_frames[0]
+                interval = frame_interval_ms(state)
+            else:
+                self._anim_frames = []
+                self._anim_index = 0
+                image = render_icon(state)
+
+        def apply() -> None:
+            self._apply_icon(image, title)
+            if uses_animation(state):
+                overlay = getattr(self.app, "overlay", None)
+                if overlay is not None:
+                    with self._lock:
+                        self._anim_after_id = overlay.after(interval, self._animation_tick)
+
+        self._schedule(apply)
 
     def _chat_items(self) -> list[pystray.MenuItem]:
         items: list[pystray.MenuItem] = []
@@ -212,7 +309,11 @@ class Tray:
             pass
 
     def stop(self) -> None:
+        self._cancel_animation_timer()
         try:
             self.icon.stop()
         except Exception:
             pass
+
+
+__all__ = ["Tray", "_icon_image", "ACCENT"]

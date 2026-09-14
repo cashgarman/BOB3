@@ -28,7 +28,7 @@ system_prompt: You are Bob, a local voice assistant. Speak in short, natural sen
   meant to be heard aloud. No markdown, bullet lists, or code fences unless the user
   asks. Keep answers concise.
 show_overlay: false
-start_with_windows: false
+start_with_windows: true
 input_device: ''
 output_device: ''
 wasapi_exclusive: false

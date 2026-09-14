@@ -362,7 +362,7 @@ def test_load_toast_text_mapping():
     assert _load_toast_text("") == ""
 
 
-def test_notify_ready_toast_sent_once(tmp_path, monkeypatch):
+def test_notify_ready_does_not_send_os_toast(tmp_path, monkeypatch):
     from bob.app import Assistant
     from bob.settings import Settings
 
@@ -375,4 +375,5 @@ def test_notify_ready_toast_sent_once(tmp_path, monkeypatch):
     assistant = Assistant(settings=Settings())
     assistant._notify_ready("CTRL+SHIFT+SPACE · llama3")
     assistant._notify_ready("ignored")
-    assert sent == [("Bob is ready", "CTRL+SHIFT+SPACE · llama3")]
+    assert sent == []
+    assert assistant._ready_toast_sent is True

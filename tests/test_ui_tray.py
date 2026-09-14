@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from bob.state import State
 from bob.ui.theme import PRESET_KEYS, PRESETS
 from bob.ui.tray import Tray, _icon_image
 from bob.voice_mood import MOOD_NAMES
@@ -126,6 +127,18 @@ def test_tray_refresh_rebuilds_menu():
     tray.refresh()
     item = find_menu_item(tray.icon.menu, "Voice", "TTS voice", "bm_george")
     assert item.checked is True
+
+
+def test_tray_set_state_updates_icon_and_title():
+    app = FakeApp()
+    tray = Tray(app)
+    tray.set_state(State.THINKING, "ollama")
+    assert tray._state is State.THINKING
+    assert tray.icon.title.startswith("Bob — Thinking")
+    tray.set_state(State.IDLE)
+    assert tray._state is State.IDLE
+    assert tray.icon.title == "Bob — Ready"
+    tray.stop()
 
 
 def test_tray_notify_no_crash_without_support():

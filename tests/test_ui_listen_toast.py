@@ -113,3 +113,18 @@ def test_toast_pin_button_does_not_toggle_listen(ui):
     assert toast.is_pinned() is True
     assert clicks == []
     toast.destroy()
+
+
+def test_toast_set_stats_updates_meters(ui):
+    toast = ListenToast(ui)
+    pump(ui, 3)
+    toast.present()
+    pump(ui)
+    toast.set_state(State.THINKING, "ollama")
+    toast.set_stats(gpu=0.42, vram=0.67, cpu=0.15)
+    pump(ui)
+    assert abs(toast.gpu_bar.get() - 0.42) < 1e-6
+    assert toast.gpu_pct.cget("text") == "42%"
+    assert toast.vram_pct.cget("text") == "67%"
+    assert toast.cpu_pct.cget("text") == "15%"
+    toast.destroy()

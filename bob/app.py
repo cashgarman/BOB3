@@ -30,6 +30,7 @@ from bob.ui import theme as theming
 from bob.ui.theme import Theme
 from bob.ui.theme_dialog import ThemeDialog
 from bob.ui.tray import Tray
+from bob.system_stats import sample_usage
 from bob.util import gpu_memory_line, split_speakable
 from bob.vad import Endpointer
 from bob.latency import TurnTimer
@@ -174,7 +175,8 @@ class Assistant:
 
     def _boot_worker(self) -> None:
         def status(msg: str) -> None:
-            self._ui(lambda m=msg: self.overlay.set_state(State.LOADING, m))
+            detail = _load_toast_text(msg) or msg
+            self._set_state(State.LOADING, detail)
 
         try:
             MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -260,10 +262,8 @@ class Assistant:
             self._ui(lambda: self.overlay.set_reply(str(exc)))
 
     def _notify_ready(self, detail: str = "") -> None:
-        if self._ready_toast_sent:
-            return
+        del detail
         self._ready_toast_sent = True
-        self._toast_load(detail, title="Bob is ready")
 
     def _toast_load(self, msg: str, title: str = "Bob is loading") -> None:
         text = _load_toast_text(msg)
@@ -318,6 +318,7 @@ class Assistant:
         try:
             self.tray = Tray(self)
             self.tray.run_detached()
+            self.tray.set_state(State.LOADING)
         except Exception:
             self.set_overlay_visible(True, persist=False)
 
@@ -1230,6 +1231,8 @@ class Assistant:
             self.hud.set_level(boost)
         if self.toast and self.toast.is_open():
             self.toast.set_waveform(self.audio.waveform_bars())
+            stats = sample_usage()
+            self.toast.set_stats(stats.gpu, stats.vram, stats.cpu)
         if not self._stop.is_set():
             self.overlay.after(50, self._poll_level)
 
@@ -1248,6 +1251,8 @@ class Assistant:
                     self.toast.set_state(state, detail)
                 else:
                     self.toast.hide()
+            if self.tray:
+                self.tray.set_state(state, detail)
 
         self._ui(apply)
 
