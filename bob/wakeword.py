@@ -57,6 +57,17 @@ class WakeWordDetector:
         except Exception as exc:
             self.error = f"Wake-word load failed: {exc}"
 
+    def set_model(self, model_name: str) -> None:
+        """Switch wake word at runtime. Detection pauses until the new model is up."""
+        name = (model_name or "").strip()
+        if not name or name == self.model_name and self._model is not None:
+            return
+        self.model_name = name
+        self._model = None
+        self.error = None
+        self.reset()
+        self.load()
+
     def _resolve_onnx(self) -> Path | None:
         needle = self.model_name.replace(" ", "_")
         matches = sorted(self.models_dir.glob(f"*{needle}*.onnx"))

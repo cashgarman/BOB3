@@ -5,12 +5,16 @@ import winreg
 from pathlib import Path
 
 from bob.settings import ROOT
+from bob.win32_app import branded_exe
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 VALUE_NAME = "Bob"
 
 
 def _pythonw() -> Path:
+    branded = branded_exe()
+    if branded.is_file():
+        return branded
     venv = ROOT / ".venv" / "Scripts" / "pythonw.exe"
     if venv.exists():
         return venv

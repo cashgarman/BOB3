@@ -27,7 +27,9 @@ if ($args -contains "--check") {
     exit $LASTEXITCODE
 }
 
+$bob = Join-Path $PSScriptRoot ".venv\Scripts\Bob.exe"
 $pythonw = Join-Path $PSScriptRoot ".venv\Scripts\pythonw.exe"
-if (-not (Test-Path $pythonw)) { $pythonw = $python }
+if (Test-Path $bob) { $pythonw = $bob }
+elseif (-not (Test-Path $pythonw)) { $pythonw = $python }
 Write-Host "Bob is in the system tray. Right-click the icon for settings. Quit from the tray."
 Start-Process -FilePath $pythonw -ArgumentList "-m","bob" -WorkingDirectory $PSScriptRoot

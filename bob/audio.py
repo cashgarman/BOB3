@@ -81,11 +81,31 @@ class AudioHub:
         return self._active_epoch
 
     def start(self, on_chunk: Callable[[np.ndarray], None] | None = None) -> None:
+        """Open the microphone. A device that no longer exists falls back to the default."""
         self._on_chunk = on_chunk
+        try:
+            self._stream = self._open_input(self.input_device)
+        except Exception:
+            if not self.input_device:
+                raise
+            self.input_device = None
+            self._stream = self._open_input(None)
+        self._stream.start()
+        try:
+            self._ensure_play_stream()
+        except Exception:
+            if self.output_device:
+                self.output_device = None
+                try:
+                    self._ensure_play_stream()
+                except Exception:
+                    pass
+
+    def _open_input(self, device: str | int | None) -> sd.InputStream:
         kwargs = {}
-        if self.input_device:
-            kwargs["device"] = self.input_device
-        self._stream = sd.InputStream(
+        if device:
+            kwargs["device"] = device
+        return sd.InputStream(
             samplerate=self.sample_rate,
             channels=1,
             dtype="float32",
@@ -93,11 +113,6 @@ class AudioHub:
             callback=self._on_input,
             **kwargs,
         )
-        self._stream.start()
-        try:
-            self._ensure_play_stream()
-        except Exception:
-            pass
 
     def stop(self) -> None:
         self.cancel_playback()

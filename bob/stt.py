@@ -32,6 +32,11 @@ class SpeechToText:
         for extra in ("int8_float16", "int8", "float16"):
             if extra not in compute_order:
                 compute_order.append(extra)
+        if not _cuda_available():
+            # Without CUDA every attempt below would download a model and then
+            # fail the same way; go straight to the CPU fallback.
+            last_error = RuntimeError("no CUDA device visible to CTranslate2")
+            chain = []
         for name in chain:
             for ctype in compute_order:
                 try:
@@ -90,4 +95,41 @@ class SpeechToText:
             no_speech_threshold=0.6,
             **kwargs,
         )
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        texts = []
+        for seg in segments:
+            text = seg.text.strip()
+            if not text or _is_hallucination(seg, text):
+                continue
+            texts.append(text)
+        return " ".join(texts).strip()
+
+
+def _cuda_available() -> bool:
+    try:
+        import ctranslate2
+
+        return int(ctranslate2.get_cuda_device_count()) > 0
+    except Exception:
+        return True  # unknown: let the CUDA attempts decide
+
+
+# Whisper's stock fillers for silence / noise. Only dropped when the model
+# itself was unsure there was speech, so a real "Thank you." still gets through.
+_FILLERS = {
+    "thank you.",
+    "thanks for watching.",
+    "thank you for watching.",
+    "thanks for watching!",
+    "you",
+    "you.",
+    "bye.",
+    "subtitles by the amara.org community",
+}
+
+
+def _is_hallucination(seg, text: str) -> bool:
+    no_speech = float(getattr(seg, "no_speech_prob", 0.0) or 0.0)
+    logprob = float(getattr(seg, "avg_logprob", 0.0) or 0.0)
+    if no_speech > 0.85 and logprob < -0.8:
+        return True
+    return no_speech > 0.5 and text.lower() in _FILLERS

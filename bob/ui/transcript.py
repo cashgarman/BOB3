@@ -4,6 +4,8 @@ from collections.abc import Sequence
 
 import customtkinter as ctk
 
+from bob.ui import theme as theming
+
 
 def paint_transcript(
     widget: ctk.CTkTextbox,
@@ -11,10 +13,11 @@ def paint_transcript(
     pending_user: str = "",
     pending_reply: str = "",
 ) -> None:
+    theme = theming.current()
     inner = widget._textbox
-    inner.tag_configure("you", foreground="#93c5fd")
-    inner.tag_configure("bob", foreground="#6ee7b7")
-    inner.tag_configure("body", foreground="#e5e7eb")
+    inner.tag_configure("you", foreground=theme.you)
+    inner.tag_configure("bob", foreground=theme.bob)
+    inner.tag_configure("body", foreground=theme.text)
 
     widget.configure(state="normal")
     widget.delete("1.0", "end")

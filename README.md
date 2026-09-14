@@ -1,8 +1,8 @@
 # Bob — local GPU speech-to-speech assistant
 
-Desktop voice assistant: **wake word** or **global hotkey** starts listening, the same hotkey **toggles off** to send. Short pauses in your speech do not end the turn.
+Desktop voice assistant: **wake word** or **global hotkey** starts listening, the same hotkey **toggles off** to send. Short pauses do not end the turn unless you enable **Auto-endpoint**.
 
-Pipeline: Faster-Whisper (CUDA) → Ollama → Kokoro TTS (CPU).
+Pipeline: streaming Faster-Whisper (CUDA) → Ollama → streaming Kokoro TTS (CPU). While Bob is speaking you can interrupt with the hotkey, or with your voice (**barge-in**, headphones assumed).
 
 ## Requirements
 
@@ -41,6 +41,8 @@ Bob lives in the **system tray**. Right-click the icon for every setting. Left-c
 |---|---|
 | Open main window | Left-click or double-click the tray icon |
 | Start / stop listening | `Ctrl+Shift+Space` or **Toggle listen** on the tray menu |
+| Auto-send after a pause | Off by default; enable **Auto-endpoint** in settings or the tray |
+| Interrupt Bob | Hotkey, or speak over him when **Voice barge-in** is on (headphones) |
 | Start listening | Wake word `hey_jarvis` |
 | Overlay | Optional; **Show overlay** on the tray menu |
 | Memories | Tray → Memories… (edit / disable / delete / forget all) |

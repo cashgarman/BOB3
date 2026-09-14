@@ -5,7 +5,9 @@ import logging
 import sys
 
 from bob.cuda_path import add_cuda_dll_dirs
+from bob.win32_app import apply_process_app_id
 
+apply_process_app_id()
 add_cuda_dll_dirs()
 
 from bob.log import setup_logging  # noqa: E402

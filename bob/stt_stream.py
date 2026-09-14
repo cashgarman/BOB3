@@ -53,6 +53,7 @@ class StreamingTranscriber:
         self._finalize_done = threading.Event()
         self._finalize_done.set()
         self._final_text = ""
+        self._turn_id = 0
         self._worker: threading.Thread | None = None
 
     def configure(
@@ -85,6 +86,7 @@ class StreamingTranscriber:
 
     def start_turn(self, seed: np.ndarray | None = None) -> None:
         with self._lock:
+            self._turn_id += 1
             self._chunks = []
             if seed is not None and seed.size:
                 pcm = np.ascontiguousarray(seed, dtype=np.float32).reshape(-1)
@@ -116,15 +118,16 @@ class StreamingTranscriber:
             return self._final_text
         self._finalize_req.set()
         self._dirty.set()
-        self._finalize_done.wait()
+        self._finalize_done.wait(timeout=60.0)
         return self._final_text
 
     def cancel(self) -> None:
-        self._active = False
-        self._finalize_req.clear()
-        self._finalize_done.set()
         with self._lock:
+            self._turn_id += 1
             self._chunks = []
+            self._active = False
+            self._finalize_req.clear()
+            self._finalize_done.set()
 
     @property
     def total_samples(self) -> int:
@@ -142,12 +145,19 @@ class StreamingTranscriber:
             try:
                 self._tick()
             except Exception:
-                if self._finalize_req.is_set():
+                if self._finalize_req.is_set() and not self._stale(self._current_turn()):
                     with self._lock:
                         self._final_text = self._committed
                     self._active = False
                     self._finalize_req.clear()
                     self._finalize_done.set()
+
+    def _current_turn(self) -> int:
+        with self._lock:
+            return self._turn_id
+
+    def _stale(self, turn: int) -> bool:
+        return turn != self._current_turn()
 
     def _snapshot(self) -> np.ndarray:
         with self._lock:
@@ -155,10 +165,12 @@ class StreamingTranscriber:
                 return np.zeros(0, dtype=np.float32)
             return np.concatenate(self._chunks)
 
-    def _drop_prefix(self, n: int) -> None:
+    def _drop_prefix(self, n: int, turn: int) -> None:
         if n <= 0:
             return
         with self._lock:
+            if turn != self._turn_id:
+                return
             remain = n
             while self._chunks and remain > 0:
                 head = self._chunks[0]
@@ -176,12 +188,13 @@ class StreamingTranscriber:
         return self.stt.transcribe(audio, self.sample_rate, initial_prompt=prompt)
 
     def _tick(self) -> None:
+        turn = self._current_turn()
         buf = self._snapshot()
         with self._lock:
             committed = self._committed
         do_final = self._finalize_req.is_set()
         if buf.size == 0:
-            if do_final:
+            if do_final and not self._stale(turn):
                 self._final_text = committed
                 self._active = False
                 self._finalize_req.clear()
@@ -207,20 +220,30 @@ class StreamingTranscriber:
 
         if closed_end > int(self.sample_rate * 0.25):
             text = self._decode(buf[:closed_end], committed)
+            if self._stale(turn):
+                return
             committed = _join(committed, text)
             with self._lock:
+                if turn != self._turn_id:
+                    return
                 self._committed = committed
-            self._drop_prefix(closed_end)
+            self._drop_prefix(closed_end, turn)
             self._prev_partial = []
             buf = buf[closed_end:]
             if self.on_partial and committed:
                 self.on_partial(committed)
 
         if do_final:
+            if self._stale(turn):
+                return
             tail = self._decode(buf, committed) if buf.size else ""
+            if self._stale(turn):
+                return
             self._final_text = _join(committed, tail)
             self._active = False
             with self._lock:
+                if turn != self._turn_id:
+                    return
                 self._chunks = []
                 self._committed = self._final_text
             self._finalize_req.clear()
@@ -231,6 +254,8 @@ class StreamingTranscriber:
         if buf.size < min_partial:
             return
         partial = self._decode(buf, committed)
+        if self._stale(turn):
+            return
         words = partial.split()
         stable = _agree_prefix(self._prev_partial, words)
         self._prev_partial = words

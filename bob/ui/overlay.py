@@ -6,61 +6,78 @@ from collections.abc import Callable, Sequence
 import customtkinter as ctk
 
 from bob.state import State
+from bob.ui import theme as theming
+from bob.ui.theme import Theme, set_role
 from bob.ui.transcript import paint_transcript
-
-STATUS_COLORS = {
-    State.IDLE: "#9aa0a6",
-    State.LISTENING: "#34d399",
-    State.THINKING: "#fbbf24",
-    State.SPEAKING: "#60a5fa",
-    State.LOADING: "#a78bfa",
-    State.ERROR: "#f87171",
-}
 
 
 class Overlay(ctk.CTk):
     def __init__(self, hotkey: str, on_toggle: Callable[[], None], on_quit: Callable[[], None]) -> None:
-        super().__init__()
-        ctk.set_appearance_mode("dark")
+        theme = theming.current()
+        ctk.set_appearance_mode(theme.appearance)
         ctk.set_default_color_theme("dark-blue")
+        super().__init__()
         self.on_toggle = on_toggle
         self.on_quit = on_quit
         self.on_hide = None
         self._messages: list[dict] = []
         self._pending_user = ""
         self._pending_reply = ""
+        self._state = State.LOADING
         self.title("Bob")
+        from bob.win32_app import apply_tk_icon
+
+        apply_tk_icon(self)
         self.geometry("560x420+40+40")
         self.minsize(420, 280)
         self.resizable(True, True)
         self.attributes("-topmost", True)
-        self.configure(fg_color="#111318")
+        self.configure(**theme.window())
         self.protocol("WM_DELETE_WINDOW", self.hide)
 
-        self.status = ctk.CTkLabel(self, text="LOADING", font=("Segoe UI", 18, "bold"), text_color="#a78bfa")
+        self.status = set_role(
+            ctk.CTkLabel(
+                self,
+                text="LOADING",
+                font=theme.font(18, "bold"),
+                text_color=theme.state_color(State.LOADING),
+            ),
+            "status",
+        )
         self.status.pack(anchor="w", padx=16, pady=(14, 2))
 
-        self.meta = ctk.CTkLabel(
-            self,
-            text=f"Toggle listen  {hotkey.upper()}",
-            font=("Segoe UI", 12),
-            text_color="#6b7280",
-            wraplength=520,
-            justify="left",
+        self.meta = set_role(
+            ctk.CTkLabel(
+                self,
+                text=f"Toggle listen  {hotkey.upper()}",
+                font=theme.font(12),
+                wraplength=520,
+                justify="left",
+                **theme.label(muted=True),
+            ),
+            "muted",
         )
         self.meta.pack(anchor="w", padx=16)
 
-        self.level = ctk.CTkProgressBar(self, height=8, progress_color="#34d399")
+        self.level = ctk.CTkProgressBar(self, height=8, **theme.progress(theme.state_color(State.LOADING)))
         self.level.pack(fill="x", padx=16, pady=(10, 8))
         self.level.set(0)
 
-        self.transcript = ctk.CTkTextbox(self, font=("Segoe UI", 13), wrap="word")
+        self.transcript = ctk.CTkTextbox(self, font=theme.font(13), wrap="word", **theme.textbox())
         self.transcript.pack(fill="both", expand=True, padx=16, pady=(0, 16))
         self._paint()
 
+    def apply_theme(self, theme: Theme) -> None:
+        theming.restyle(self, theme)
+        color = theme.state_color(self._state)
+        self.status.configure(text_color=color)
+        self.level.configure(progress_color=color)
+        self._paint()
+
     def set_state(self, state: State, detail: str = "") -> None:
+        self._state = state
         label = state.value.upper()
-        color = STATUS_COLORS.get(state, "#9aa0a6")
+        color = theming.current().state_color(state)
         self.status.configure(text=label, text_color=color)
         self.level.configure(progress_color=color)
         if detail:

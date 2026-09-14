@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 import queue
 import threading
 import time
 
-from bob.audio import AudioHub, list_devices, rms
+from bob.audio import AudioHub, list_devices
 from bob.chat_store import ChatStore
 from bob.hotkeys import GlobalHotkey
 from bob.llm import OllamaChat
@@ -28,7 +29,15 @@ from bob.util import gpu_memory_line, split_speakable
 from bob.vad import Endpointer
 from bob.wakeword import WakeWordDetector
 
+log = logging.getLogger(__name__)
+
 RESTART_FIELDS = {"stt_model", "stt_compute_type", "sample_rate"}
+# Transcript rows repainted on every streamed token; older history stays in
+# chat.db but is not redrawn 50 times a second.
+MAX_SHOWN_MESSAGES = 60
+# Ignore hotkey/tray/toast toggles that land closer together than this.
+TOGGLE_DEBOUNCE_SEC = 0.25
+MODELS_CACHE_SEC = 20.0
 
 
 class Assistant:
@@ -37,7 +46,12 @@ class Assistant:
         self.settings.start_with_windows = startup_is_enabled()
         self.state = State.LOADING
         self._stop = threading.Event()
+        # Cancel token for the *current* turn. _begin_listen() sets it and then
+        # swaps in a fresh Event, so a pipeline thread that is still winding
+        # down keeps seeing its own cancelled token instead of the new turn's.
         self._cancel = threading.Event()
+        self._last_toggle = 0.0
+        self._models_cache: tuple[float, list[tuple[str, bool]]] = (0.0, [])
         self._state_lock = threading.Lock()
         self._pipeline_thread: threading.Thread | None = None
         self._chunk_q: queue.Queue = queue.Queue(maxsize=64)
@@ -67,7 +81,7 @@ class Assistant:
             self.settings.stt_compute_type,
             MODELS_DIR / "whisper",
         )
-        self.tts = TextToSpeech(MODELS_DIR / "kokoro", self.settings.tts_voice)
+        self.tts = TextToSpeech(MODELS_DIR / "kokoro", self.settings.tts_voice, self.settings.tts_speed)
         self.stt_stream = StreamingTranscriber(
             self.stt,
             sample_rate=self.settings.sample_rate,
@@ -129,17 +143,34 @@ class Assistant:
             MODELS_DIR.mkdir(parents=True, exist_ok=True)
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             status("Ollama")
-            self.llm.ping()
+            ollama_ok = True
+            try:
+                self.llm.ping()
+            except Exception as exc:
+                # Not fatal: everything else can come up, and the model is
+                # (re)loaded from the tray or on the first turn.
+                ollama_ok = False
+                log.warning("Ollama unreachable at %s: %s", self.llm.host, exc)
+                self._ui(
+                    lambda: self.overlay.set_reply(
+                        f"Ollama is not reachable at {self.llm.host}. Start it, then use "
+                        "Models → Reconnect Ollama in the tray."
+                    )
+                )
             status("Whisper CUDA")
             self.stt.load()
+            log.info("Whisper %s on %s (%s)", self.stt.model_name, self.stt.device, self.stt.compute_type)
             status("Kokoro TTS")
             self.tts.load(on_status=status)
             status("Wake word")
             self.wake.load()
+            if self.wake.error:
+                log.warning("Wake word: %s", self.wake.error)
             status("Memory")
             try:
                 self.memory.load()
             except Exception as exc:
+                log.exception("Memory failed to load")
                 self._ui(lambda: self.overlay.set_reply(f"Memory offline: {exc}"))
             status("Tools")
             self._load_tools(status)
@@ -149,14 +180,23 @@ class Assistant:
             self.speech.start()
             threading.Thread(target=self._chunk_loop, name="chunks", daemon=True).start()
             self._restart_hotkey()
-            status(f"Loading {self.settings.llm_model}")
-            self.llm.preload()
+            if self.hotkey and self.hotkey.error:
+                log.warning("Hotkey: %s", self.hotkey.error)
+            if ollama_ok:
+                status(f"Loading {self.settings.llm_model}")
+                try:
+                    self.llm.preload()
+                except Exception as exc:
+                    log.warning("Model preload failed: %s", exc)
+                    self._ui(lambda: self.overlay.set_reply(f"Model load failed: {exc}"))
             detail = self._ready_detail()
             self._set_state(State.IDLE, detail)
             self._ui(lambda: self.overlay.set_meta(detail))
             if self.tray:
                 self._ui(self.tray.refresh)
+            log.info("Ready: %s", detail)
         except Exception as exc:
+            log.exception("Boot failed")
             self._set_state(State.ERROR, str(exc)[:80])
             self._ui(lambda: self.overlay.set_reply(str(exc)))
 
@@ -205,13 +245,23 @@ class Assistant:
             self.set_overlay_visible(True, persist=False)
 
     def _tray_models(self) -> list[tuple[str, bool]]:
+        """Ollama model list for menus. Cached so rebuilding the tray menu on the
+        UI thread does not block on the network every time a setting changes."""
+        stamp, cached = self._models_cache
+        if cached and time.monotonic() - stamp < MODELS_CACHE_SEC:
+            return cached
         out = []
-        for item in self.llm.list_models():
-            name = item.get("name") or item.get("model") or ""
-            if not name:
-                continue
-            large = int(item.get("size") or 0) > 6 * 1024 * 1024 * 1024
-            out.append((name, large))
+        try:
+            for item in self.llm.list_models():
+                name = item.get("name") or item.get("model") or ""
+                if not name:
+                    continue
+                large = int(item.get("size") or 0) > 6 * 1024 * 1024 * 1024
+                out.append((name, large))
+        except Exception as exc:
+            log.debug("list_models failed: %s", exc)
+            return cached
+        self._models_cache = (time.monotonic(), out)
         return out
 
     def apply_setting(self, field: str, value) -> None:
@@ -234,6 +284,12 @@ class Assistant:
             else:
                 values["max_silence_sec"] = 0.0
         restart = any(str(getattr(self.settings, k, None)) != str(v) for k, v in values.items() if k in RESTART_FIELDS)
+        devices_changed = any(
+            str(getattr(self.settings, k, "") or "") != str(values.get(k, "") or "")
+            for k in ("input_device", "output_device")
+            if k in values
+        )
+        model_changed = str(values.get("llm_model", self.settings.llm_model)) != self.settings.llm_model
         self.settings.update(**values)
         self.llm.host = self.settings.ollama_host.rstrip("/")
         self.llm.model = self.settings.llm_model
@@ -241,10 +297,13 @@ class Assistant:
         self.llm.system_prompt = self.settings.system_prompt
         self.llm.max_turns = self.settings.max_history_turns
         self.tts.voice = self.settings.tts_voice
+        from bob.tts import clamp_speed
+
+        self.tts.speed = clamp_speed(self.settings.tts_speed)
         self.wake.enabled = self.settings.wake_word_enabled
         self.wake.threshold = self.settings.wake_threshold
         if self.settings.wake_word != self.wake.model_name:
-            self.wake.model_name = self.settings.wake_word
+            self._reload_wake_word(self.settings.wake_word)
         self._configure_streaming()
         self.set_overlay_visible(self.settings.show_overlay, persist=False)
         self.set_start_with_windows(self.settings.start_with_windows)
@@ -253,7 +312,12 @@ class Assistant:
         elif not self.tools.names():
             self._reload_tools()
         self._restart_hotkey()
-        self._restart_audio()
+        if devices_changed:
+            # Reopening the mic mid-turn drops the listen buffer, so only do it
+            # when a device actually changed.
+            self._restart_audio()
+        if model_changed:
+            threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
         self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
         if restart:
             self._ui(lambda: self.overlay.set_reply("Some settings need a Bob restart (STT / sample rate)."))
@@ -274,12 +338,16 @@ class Assistant:
             self.llm.host = str(value).rstrip("/")
         elif field == "tts_voice":
             self.tts.voice = str(value)
+        elif field == "tts_speed":
+            from bob.tts import clamp_speed
+
+            self.tts.speed = clamp_speed(value)
         elif field == "wake_word_enabled":
             self.wake.enabled = bool(value)
         elif field == "wake_threshold":
             self.wake.threshold = float(value)
         elif field == "wake_word":
-            self.wake.model_name = str(value)
+            self._reload_wake_word(str(value))
         elif field == "hotkey":
             self._restart_hotkey()
         elif field in {"input_device", "output_device"}:
@@ -396,13 +464,59 @@ class Assistant:
 
     def _restart_audio(self) -> None:
         listening = self.audio.is_listening
-        self.audio.stop()
+        try:
+            self.audio.stop()
+        except Exception:
+            log.exception("Stopping audio failed")
         self.audio.input_device = self.settings.input_device or None
         self.audio.output_device = self.settings.output_device or None
         self.audio.sample_rate = self.settings.sample_rate
-        self.audio.start(on_chunk=self._enqueue_chunk)
+        try:
+            self.audio.start(on_chunk=self._enqueue_chunk)
+        except Exception as exc:
+            # Runs from tray / settings callbacks; an unhandled error here used
+            # to leave Bob with no microphone and no message.
+            log.exception("Audio restart failed")
+            self._ui(lambda: self.overlay.set_reply(f"Audio device error: {exc}"))
+            return
+        if self.audio.input_device is None and self.settings.input_device:
+            # AudioHub fell back to the default device because the saved one is gone.
+            self.settings.update(input_device="")
+            self._ui(lambda: self.overlay.set_reply("Saved microphone not found; using the system default."))
+        if self.audio.output_device is None and self.settings.output_device:
+            self.settings.update(output_device="")
         if listening:
             self.audio.start_listening()
+
+    def _reload_wake_word(self, name: str) -> None:
+        def work() -> None:
+            self.wake.set_model(name)
+            if self.wake.error:
+                log.warning("Wake word reload failed: %s", self.wake.error)
+                self._ui(lambda: self.overlay.set_reply(f"Wake word: {self.wake.error}"))
+            self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
+
+        threading.Thread(target=work, name="wakeword-reload", daemon=True).start()
+
+    def stop_speaking(self) -> None:
+        """Cut Bob off and go idle without starting a new listen (tray action)."""
+
+        def apply() -> None:
+            if self.state not in {State.SPEAKING, State.THINKING}:
+                return
+            self._cancel_current_turn()
+            self._barge_armed = False
+            self.audio.set_capture_muted(False)
+            self._set_state(State.IDLE, self._ready_detail())
+            self._restore_idle_ui()
+
+        self._ui(apply)
+
+    def _cancel_current_turn(self) -> None:
+        """Cancel the running pipeline and hand out a fresh token for the next one."""
+        self._cancel.set()
+        self._cancel = threading.Event()
+        self.speech.cancel()
 
     def _configure_streaming(self) -> None:
         s = self.settings
@@ -418,9 +532,19 @@ class Assistant:
 
     def _preload_safe(self) -> None:
         try:
+            self._ui(lambda: self.overlay.set_meta(f"Loading {self.llm.model} …"))
             self.llm.preload()
+            self._models_cache = (0.0, [])
+            self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
+            if self.tray:
+                self._ui(self.tray.refresh)
         except Exception as exc:
+            log.warning("Model preload failed: %s", exc)
             self._ui(lambda: self.overlay.set_reply(f"Model load failed: {exc}"))
+            self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
+
+    def reconnect_ollama(self) -> None:
+        threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
 
     def _restore_llm_history(self) -> None:
         max_msgs = max(2, int(self.settings.max_history_turns) * 2)
@@ -489,17 +613,14 @@ class Assistant:
         self._ui(self._toggle_from_ui)
 
     def _toggle_from_ui(self) -> None:
+        now = time.monotonic()
+        if now - self._last_toggle < TOGGLE_DEBOUNCE_SEC:
+            return
+        self._last_toggle = now
         state = self.state
         if state in {State.LOADING, State.ERROR}:
             return
-        if state == State.SPEAKING:
-            self._cancel.set()
-            self.speech.cancel()
-            self._begin_listen()
-            return
-        if state == State.THINKING:
-            self._cancel.set()
-            self.speech.cancel()
+        if state in {State.SPEAKING, State.THINKING}:
             self._begin_listen()
             return
         if state == State.LISTENING:
@@ -579,44 +700,75 @@ class Assistant:
         if self._overlay_viewable():
             self.overlay.set_phase("idle")
 
-    def _begin_listen(self) -> None:
+    def _begin_listen(self, seed=None) -> None:
         self._cancel.set()
-        self.audio.stop_playback()
-        self._cancel.clear()
+        self.speech.cancel()
+        self.stt_stream.cancel()
         self.audio.set_capture_muted(False)
-        self._heard_speech = False
-        self._last_voice = time.monotonic()
-        self.audio.start_listening()
+        self._listen_endpointer.reset()
+        self._barge_endpointer.reset()
+        self._endpoint_armed = True
+        self._barge_armed = False
+        self.audio.start_listening(seed)
+        self.stt_stream.start_turn(seed)
+        if seed is not None and getattr(seed, "size", 0):
+            self._listen_endpointer.feed(seed)
         self._present_talk("listen")
         self._talk_set_user("")
         self._talk_set_reply("")
-        self._set_state(State.LISTENING, f"{self.settings.hotkey.upper()} to send")
+        hint = "pause to send" if self.settings.auto_endpoint else f"{self.settings.hotkey.upper()} to send"
+        self._set_state(State.LISTENING, hint)
+        self._cancel.clear()
+
+    def _barge_in(self, seed) -> None:
+        if self.state not in {State.SPEAKING, State.THINKING}:
+            return
+        self._begin_listen(seed=seed)
 
     def _finish_listen(self) -> None:
-        audio = self.audio.stop_listening()
+        if self.state != State.LISTENING:
+            return
+        self._endpoint_armed = False
+        self.audio.stop_listening()
         self._present_talk("reply")
         self._talk_set_reply("…")
         self._set_state(State.THINKING, "transcribing")
         self._pipeline_thread = threading.Thread(
             target=self._pipeline,
-            args=(audio,),
             name="pipeline",
             daemon=True,
         )
         self._pipeline_thread.start()
 
-    def _pipeline(self, audio) -> None:
+    def _on_partial(self, text: str) -> None:
+        if self.state == State.LISTENING and text:
+            self._talk_set_user(text + " …")
+
+    def _start_speech(self) -> int:
+        epoch = self.speech.begin()
+        if not self.settings.barge_in:
+            self.audio.set_capture_muted(True)
+        else:
+            self.audio.set_capture_muted(False)
+            self._barge_endpointer.reset()
+            self._barge_armed = True
+        self._set_state(State.SPEAKING)
+        return epoch
+
+    def _pipeline(self) -> None:
         assistant_text = ""
         user_text = ""
+        epoch = 0
+        started = False
         try:
-            if audio.size < self.settings.sample_rate * 0.25:
+            user_text = self.stt_stream.finalize()
+            if self._cancel.is_set():
+                return
+            too_short = self.stt_stream.total_samples < self.settings.sample_rate * 0.25
+            if too_short and not user_text.strip():
                 self._talk_set_user("(too short)")
                 self._set_state(State.IDLE, self._ready_detail())
                 self._ui(self._restore_idle_ui)
-                return
-            with self._stt_lock:
-                user_text = self.stt.transcribe(audio, self.settings.sample_rate)
-            if self._cancel.is_set():
                 return
             if not user_text.strip():
                 self._talk_set_user("(no speech detected)")
@@ -632,7 +784,6 @@ class Assistant:
                 memory_block = ""
             pending = ""
             full = ""
-            started = False
             for chunk in self.llm.chat(
                 user_text,
                 memory_block=memory_block,
@@ -642,27 +793,44 @@ class Assistant:
                 max_rounds=int(self.settings.max_tool_rounds),
             ):
                 if self._cancel.is_set():
+                    if started:
+                        self.speech.cancel()
                     return
                 full += chunk
                 pending += chunk
                 self._talk_set_reply(full)
-                sentences, pending = split_sentences(pending)
-                for sentence in sentences:
+                pieces, pending = split_speakable(pending, first=not started)
+                for piece in pieces:
                     if self._cancel.is_set():
+                        self.speech.cancel()
                         return
-                    self._speak_sentence(sentence, start=not started)
-                    started = True
+                    if not started:
+                        epoch = self._start_speech()
+                        started = True
+                    self.speech.feed(piece)
             leftover = pending.strip()
             if leftover and not self._cancel.is_set():
-                self._speak_sentence(leftover, start=not started)
-                started = True
+                if not started:
+                    epoch = self._start_speech()
+                    started = True
+                self.speech.feed(leftover)
+            if self._cancel.is_set():
+                if started:
+                    self.speech.cancel()
+                return
+            if started:
+                self.speech.finish()
             assistant_text = full.strip()
             if assistant_text:
                 self._commit_turn("assistant", assistant_text)
-            self.audio.wait_playback()
+            if started:
+                self.speech.wait(epoch)
         except Exception as exc:
             self._talk_set_reply(f"Error: {exc}")
+            if started:
+                self.speech.cancel()
         finally:
+            self._barge_armed = False
             self.audio.set_capture_muted(False)
             if not self._cancel.is_set() and self.state != State.LISTENING:
                 self._set_state(State.IDLE, self._ready_detail())
@@ -695,38 +863,6 @@ class Assistant:
             self.memory.ingest(user_text, assistant_text, self.llm.generate)
         except Exception:
             pass
-
-    def _speak_sentence(self, sentence: str, start: bool) -> None:
-        samples, sr = self.tts.synthesize(sentence)
-        if self._cancel.is_set():
-            return
-        if start:
-            self.audio.set_capture_muted(True)
-            self._set_state(State.SPEAKING)
-        self.audio.play(samples, sr)
-
-    def _caption_loop(self) -> None:
-        while not self._stop.is_set():
-            if self.state == State.LISTENING:
-                snap = self.audio.snapshot_listening()
-                max_samples = self.settings.sample_rate * 8
-                if snap.size > max_samples:
-                    snap = snap[-max_samples:]
-                if snap.size > self.settings.sample_rate * 0.8:
-                    try:
-                        if not self._stt_lock.acquire(blocking=False):
-                            continue
-                        try:
-                            if self.state != State.LISTENING:
-                                continue
-                            text = self.stt.transcribe(snap, self.settings.sample_rate)
-                        finally:
-                            self._stt_lock.release()
-                        if text and self.state == State.LISTENING:
-                            self._talk_set_user(text + " …")
-                    except Exception:
-                        pass
-            self._stop.wait(1.6)
 
     def _poll_level(self) -> None:
         if self.overlay is None:
@@ -768,6 +904,8 @@ class Assistant:
     def quit(self) -> None:
         self._stop.set()
         self._cancel.set()
+        self.stt_stream.stop()
+        self.speech.stop()
         self.audio.stop_playback()
         self._ui(self._shutdown_ui)
 
@@ -814,11 +952,34 @@ def run_check() -> int:
     print("whisper: loading ...")
     stt.load()
     print(f"whisper: {stt.model_name} on {stt.device} ({stt.compute_type})")
-    tts = TextToSpeech(MODELS_DIR / "kokoro", settings.tts_voice)
+    tts = TextToSpeech(MODELS_DIR / "kokoro", settings.tts_voice, settings.tts_speed)
     print("kokoro:  loading ...")
     tts.load(on_status=print)
     samples, sr = tts.synthesize("Bob is ready.")
     print(f"kokoro:  {len(samples)} samples @ {sr} Hz")
+    import asyncio
+    import numpy as np
+    from bob.vad import speech_regions
+
+    t0 = time.perf_counter()
+    first_chunk_s = None
+
+    async def _first_chunk() -> None:
+        nonlocal first_chunk_s
+        async for _samples, _sr in tts.synthesize_stream("Sure, I can help with that right away."):
+            first_chunk_s = time.perf_counter() - t0
+            break
+
+    asyncio.run(_first_chunk())
+    if first_chunk_s is not None:
+        print(f"kokoro:  first stream chunk {first_chunk_s * 1000:.0f} ms")
+    print(f"stt:     partial interval {settings.stt_partial_interval_ms} ms")
+    t0 = time.perf_counter()
+    stt.transcribe(np.zeros(int(settings.sample_rate * 1.0), dtype=np.float32), settings.sample_rate)
+    print(f"whisper: 1s decode {(time.perf_counter() - t0) * 1000:.0f} ms")
+    t0 = time.perf_counter()
+    speech_regions(np.zeros(settings.sample_rate, dtype=np.float32), sample_rate=settings.sample_rate)
+    print(f"vad:     {(time.perf_counter() - t0) * 1000:.0f} ms / 1s audio")
     wake = WakeWordDetector(
         settings.wake_word,
         settings.wake_threshold,

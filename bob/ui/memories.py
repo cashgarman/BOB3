@@ -5,6 +5,9 @@ from datetime import datetime
 
 import customtkinter as ctk
 
+from bob.ui import theme as theming
+from bob.ui.theme import Theme, set_role
+
 
 class MemoriesWindow(ctk.CTkToplevel):
     def __init__(
@@ -19,9 +22,11 @@ class MemoriesWindow(ctk.CTkToplevel):
         on_autosave: Callable[[bool], None],
     ) -> None:
         super().__init__(master)
+        theme = theming.current()
         self.title("Bob memories")
         self.geometry("560x520")
         self.attributes("-topmost", True)
+        self.configure(**theme.window())
         self.rows_provider = rows_provider
         self.on_toggle = on_toggle
         self.on_edit = on_edit
@@ -32,25 +37,33 @@ class MemoriesWindow(ctk.CTkToplevel):
 
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="x", padx=12, pady=(12, 6))
-        self.search = ctk.CTkEntry(top, placeholder_text="Search memories")
+        self.search = ctk.CTkEntry(top, placeholder_text="Search memories", **theme.entry())
         self.search.pack(side="left", fill="x", expand=True)
         self.search.bind("<KeyRelease>", lambda *_: self.refresh())
         self.auto = ctk.BooleanVar(value=autosave)
-        ctk.CTkCheckBox(top, text="Autosave", variable=self.auto, command=self._auto).pack(side="right", padx=(8, 0))
+        ctk.CTkCheckBox(top, text="Autosave", variable=self.auto, command=self._auto, **theme.check()).pack(
+            side="right", padx=(8, 0)
+        )
 
-        self.listbox = ctk.CTkScrollableFrame(self, height=240)
+        self.listbox = ctk.CTkScrollableFrame(self, height=240, **theme.scroll_frame())
         self.listbox.pack(fill="both", expand=True, padx=12)
 
-        self.editor = ctk.CTkTextbox(self, height=90)
+        self.editor = ctk.CTkTextbox(self, height=90, **theme.textbox())
         self.editor.pack(fill="x", padx=12, pady=8)
 
         buttons = ctk.CTkFrame(self, fg_color="transparent")
         buttons.pack(fill="x", padx=12, pady=(0, 12))
-        ctk.CTkButton(buttons, text="Save edit", command=self._save).pack(side="left")
-        ctk.CTkButton(buttons, text="Enable/disable", command=self._toggle).pack(side="left", padx=6)
-        ctk.CTkButton(buttons, text="Delete", command=self._delete).pack(side="left")
-        ctk.CTkButton(buttons, text="Forget all", fg_color="#7f1d1d", command=self._forget).pack(side="right")
+        ctk.CTkButton(buttons, text="Save edit", command=self._save, **theme.button()).pack(side="left")
+        ctk.CTkButton(buttons, text="Enable/disable", command=self._toggle, **theme.button()).pack(side="left", padx=6)
+        ctk.CTkButton(buttons, text="Delete", command=self._delete, **theme.button()).pack(side="left")
+        set_role(
+            ctk.CTkButton(buttons, text="Forget all", command=self._forget, **theme.button("danger")),
+            "danger",
+        ).pack(side="right")
         self.refresh()
+
+    def apply_theme(self, theme: Theme) -> None:
+        theming.restyle(self, theme)
 
     def _auto(self) -> None:
         self.on_autosave(bool(self.auto.get()))
@@ -59,6 +72,7 @@ class MemoriesWindow(ctk.CTkToplevel):
         for child in self.listbox.winfo_children():
             child.destroy()
         needle = (self.search.get() or "").lower()
+        theme = theming.current()
         for row in self.rows_provider():
             text = str(row.get("text") or "")
             if needle and needle not in text.lower():
@@ -71,15 +85,16 @@ class MemoriesWindow(ctk.CTkToplevel):
             except Exception:
                 when = ""
             label = f"{'[on] ' if enabled else '[off] '}{text}"
+            role = "surface" if enabled else "surface_off"
             btn = ctk.CTkButton(
                 self.listbox,
                 text=f"{label}\n{when}",
                 anchor="w",
                 height=48,
-                fg_color="#1f2937" if enabled else "#111827",
                 command=lambda i=mid, t=text: self._select(i, t),
+                **theme.button(role),
             )
-            btn.pack(fill="x", pady=3)
+            set_role(btn, role).pack(fill="x", pady=3)
 
     def _select(self, memory_id: str, text: str) -> None:
         self._selected = memory_id

@@ -30,10 +30,19 @@ def _download(url: str, dest: Path, on_status=None) -> None:
     tmp.replace(dest)
 
 
+def clamp_speed(value) -> float:
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    return max(0.5, min(2.0, speed))
+
+
 class TextToSpeech:
-    def __init__(self, models_dir: Path, voice: str) -> None:
+    def __init__(self, models_dir: Path, voice: str, speed: float = 1.0) -> None:
         self.models_dir = models_dir
         self.voice = voice
+        self.speed = clamp_speed(speed)
         self.sample_rate = 24000
         self._kokoro = None
 
@@ -58,7 +67,7 @@ class TextToSpeech:
         text = (text or "").strip()
         if not text:
             return
-        async for samples, sr in self._kokoro.create_stream(text, voice=self.voice, speed=1.0):
+        async for samples, sr in self._kokoro.create_stream(text, voice=self.voice, speed=self.speed):
             self.sample_rate = int(sr)
             yield np.asarray(samples, dtype=np.float32), int(sr)
 
@@ -68,6 +77,6 @@ class TextToSpeech:
         text = (text or "").strip()
         if not text:
             return np.zeros(0, dtype=np.float32), self.sample_rate
-        samples, sr = self._kokoro.create(text, voice=self.voice, speed=1.0)
+        samples, sr = self._kokoro.create(text, voice=self.voice, speed=self.speed)
         self.sample_rate = int(sr)
         return np.asarray(samples, dtype=np.float32), int(sr)

@@ -38,14 +38,21 @@ class VectorStore:
         except Exception:
             pass
 
-    def add(self, text: str, vector: np.ndarray, memory_id: str | None = None) -> str:
+    def add(
+        self,
+        text: str,
+        vector: np.ndarray,
+        memory_id: str | None = None,
+        enabled: bool = True,
+        created: float | None = None,
+    ) -> str:
         mid = memory_id or uuid.uuid4().hex
         now = time.time()
         row = {
             "id": mid,
             "text": text,
-            "enabled": True,
-            "created": now,
+            "enabled": bool(enabled),
+            "created": float(created) if created else now,
             "updated": now,
             "vector": np.asarray(vector, dtype=np.float32).reshape(-1).tolist(),
         }
@@ -53,8 +60,13 @@ class VectorStore:
         return mid
 
     def update_text(self, memory_id: str, text: str, vector: np.ndarray) -> None:
+        # Keep the enabled flag and creation time; editing a disabled memory
+        # should not silently switch it back on.
+        prior = next((r for r in self.list_all() if r["id"] == memory_id), None)
+        enabled = bool(prior.get("enabled", True)) if prior else True
+        created = float(prior.get("created") or 0) if prior else None
         self.delete(memory_id)
-        self.add(text, vector, memory_id=memory_id)
+        self.add(text, vector, memory_id=memory_id, enabled=enabled, created=created or None)
 
     def set_enabled(self, memory_id: str, enabled: bool) -> None:
         rows = [r for r in self.list_all() if r["id"] == memory_id]

@@ -119,6 +119,8 @@ def _runner(
     signature: inspect.Signature,
     hints: dict[str, Any],
 ) -> Callable[[dict[str, Any], ToolContext], Any]:
+    accepts_extra = any(p.kind is p.VAR_KEYWORD for p in signature.parameters.values())
+
     def run(arguments: dict[str, Any], ctx: ToolContext) -> Any:
         kwargs: dict[str, Any] = {}
         for param_name, param in signature.parameters.items():
@@ -132,6 +134,12 @@ def _runner(
                 kwargs[param_name] = _coerce(arguments[param_name], annotation)
             elif param.default is inspect.Parameter.empty:
                 raise ToolError(f"missing required argument '{param_name}'")
+        if accepts_extra:
+            # Explicit `parameters=` schemas often pair with **kwargs: hand over
+            # everything the model sent that no named parameter claimed.
+            for key, value in arguments.items():
+                if key not in kwargs and key not in signature.parameters:
+                    kwargs[key] = value
         return fn(**kwargs)
 
     return run

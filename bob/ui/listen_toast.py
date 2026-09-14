@@ -10,11 +10,11 @@ import customtkinter as ctk
 
 from bob.audio import WAVE_BARS
 from bob.state import State
-from bob.ui.overlay import STATUS_COLORS
+from bob.ui import theme as theming
+from bob.ui.theme import Theme, set_role
 
 TOAST_W = 364
 TOAST_H = 118
-BG = "#1c1c1e"
 MARGIN = 16
 
 
@@ -41,7 +41,7 @@ def _work_area() -> tuple[int, int, int, int]:
     return (rect.left, rect.top, rect.right, rect.bottom)
 
 
-def _style_native(hwnd: int) -> None:
+def _style_native(hwnd: int, dark: bool = True) -> None:
     if sys.platform != "win32" or not hwnd:
         return
     import ctypes
@@ -85,12 +85,12 @@ def _style_native(hwnd: int) -> None:
             ctypes.byref(corner),
             ctypes.sizeof(corner),
         )
-        dark = ctypes.c_int(1)
+        dark_flag = ctypes.c_int(1 if dark else 0)
         dwmapi.DwmSetWindowAttribute(
             wintypes.HWND(hwnd),
             DWMWA_USE_IMMERSIVE_DARK_MODE,
-            ctypes.byref(dark),
-            ctypes.sizeof(dark),
+            ctypes.byref(dark_flag),
+            ctypes.sizeof(dark_flag),
         )
     except Exception:
         pass
@@ -109,56 +109,68 @@ class ListenToast(ctk.CTkToplevel):
 
     def __init__(self, master: ctk.CTk, on_click: Callable[[], None] | None = None) -> None:
         super().__init__(master)
+        theme = theming.current()
         self.on_click = on_click
         self._open = False
         self._state = State.LISTENING
         self._shown = [0.08] * WAVE_BARS
         self.overrideredirect(True)
         self.resizable(False, False)
-        self.configure(fg_color=BG)
+        set_role(self, "skip")
+        self.configure(fg_color=theme.surface)
         self.attributes("-topmost", True)
         if sys.platform == "win32":
             self.attributes("-toolwindow", True)
         self.protocol("WM_DELETE_WINDOW", self.hide)
 
-        inner = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)
-        inner.pack(fill="both", expand=True, padx=14, pady=12)
+        self.inner = ctk.CTkFrame(self, fg_color=theme.surface, corner_radius=0)
+        self.inner.pack(fill="both", expand=True, padx=14, pady=12)
+        inner = self.inner
 
         header = ctk.CTkFrame(inner, fg_color="transparent")
         header.pack(fill="x")
-        self.app_name = ctk.CTkLabel(
-            header,
-            text="Bob",
-            font=("Segoe UI", 12),
-            text_color="#9a9a9a",
-            anchor="w",
+        self.app_name = set_role(
+            ctk.CTkLabel(
+                header,
+                text="Bob",
+                font=theme.font(12),
+                text_color=theme.text_muted,
+                anchor="w",
+            ),
+            "muted",
         )
         self.app_name.pack(side="left")
-        self.status = ctk.CTkLabel(
-            header,
-            text="LISTENING",
-            font=("Segoe UI", 13, "bold"),
-            text_color=STATUS_COLORS[State.LISTENING],
-            anchor="e",
+        self.status = set_role(
+            ctk.CTkLabel(
+                header,
+                text="LISTENING",
+                font=theme.font(13, "bold"),
+                text_color=theme.state_color(State.LISTENING),
+                anchor="e",
+            ),
+            "status",
         )
         self.status.pack(side="right")
 
         self.wave = tk.Canvas(
             inner,
             height=44,
-            bg=BG,
+            bg=theme.surface,
             highlightthickness=0,
             bd=0,
             cursor="hand2",
         )
         self.wave.pack(fill="x", pady=(8, 6))
 
-        self.meta = ctk.CTkLabel(
-            inner,
-            text="",
-            font=("Segoe UI", 11),
-            text_color="#6b7280",
-            anchor="w",
+        self.meta = set_role(
+            ctk.CTkLabel(
+                inner,
+                text="",
+                font=theme.font(11),
+                text_color=theme.text_muted,
+                anchor="w",
+            ),
+            "muted",
         )
         self.meta.pack(fill="x")
 
@@ -167,6 +179,14 @@ class ListenToast(ctk.CTkToplevel):
         self.wave.bind("<Configure>", lambda _e: self._paint())
         self.withdraw()
         self.after(20, self._init_native)
+
+    def apply_theme(self, theme: Theme) -> None:
+        theming.restyle(self, theme)  # the toplevel itself is role "skip": it is a card, not a window
+        self.configure(fg_color=theme.surface)
+        self.wave.configure(bg=theme.surface)
+        self.status.configure(text_color=theme.state_color(self._state))
+        self._style()
+        self._paint()
 
     def is_open(self) -> bool:
         return self._open
@@ -199,7 +219,7 @@ class ListenToast(ctk.CTkToplevel):
 
     def set_state(self, state: State, detail: str = "") -> None:
         self._state = state
-        color = STATUS_COLORS.get(state, "#9aa0a6")
+        color = theming.current().state_color(state)
         self.status.configure(text=state.value.upper(), text_color=color)
         if detail:
             self.meta.configure(text=detail)
@@ -235,7 +255,7 @@ class ListenToast(ctk.CTkToplevel):
         if width < 8 or height < 8:
             return
         canvas.delete("all")
-        color = STATUS_COLORS.get(self._state, "#9aa0a6")
+        color = theming.current().state_color(self._state)
         n = len(self._shown)
         gap = 2
         bar_w = max(2.0, (width - gap * (n - 1)) / n)
@@ -274,7 +294,7 @@ class ListenToast(ctk.CTkToplevel):
 
     def _style(self) -> None:
         try:
-            _style_native(_hwnd(self))
+            _style_native(_hwnd(self), dark=theming.current().appearance != "light")
         except Exception:
             pass
 

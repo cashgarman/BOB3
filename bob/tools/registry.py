@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import sys
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -58,9 +59,16 @@ class ToolRegistry:
     def load(self) -> list[str]:
         """Import built-ins and user plugins, then publish them as tools."""
         self.errors = [err for err in self.errors if err.startswith("mcp")]
+        # Start from a clean slate so a plugin file that was deleted or renamed
+        # since the last load does not keep offering its old tools.
+        _DECLARED.clear()
         for module in BUILTIN_MODULES:
             try:
-                importlib.import_module(module)
+                loaded = sys.modules.get(module)
+                if loaded is not None:
+                    importlib.reload(loaded)
+                else:
+                    importlib.import_module(module)
             except Exception as exc:
                 self.errors.append(f"builtin {module}: {exc}")
         self._load_plugins()

@@ -9,6 +9,13 @@ from bob.ui.settings_dialog import COMPUTE, STT_MODELS, VOICES, WAKE_WORDS
 
 
 def _icon_image() -> Image.Image:
+    from bob.win32_app import icon_path
+
+    path = icon_path()
+    if path.is_file():
+        img = Image.open(path)
+        img.load()
+        return img.convert("RGBA")
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.ellipse((4, 4, 60, 60), fill=(17, 19, 24, 255), outline=(52, 211, 153, 255), width=4)
@@ -75,6 +82,7 @@ class Tray:
         return pystray.Menu(
             pystray.MenuItem("Open Bob", lambda *_: self.app.open_main_ui(), default=True),
             pystray.MenuItem("Toggle listen", lambda *_: self.app.toggle_listen()),
+            pystray.MenuItem("Stop talking", lambda *_: self.app.stop_speaking()),
             bool_item("Show overlay", "show_overlay", self.app.set_overlay_visible),
             pystray.MenuItem("New conversation", lambda *_: self.app._new_chat()),
             pystray.MenuItem("Memories…", lambda *_: self.app.open_memories()),
@@ -85,6 +93,15 @@ class Tray:
                     pystray.MenuItem("Input device", pystray.Menu(*input_items)),
                     pystray.MenuItem("Output device", pystray.Menu(*output_items)),
                     pystray.MenuItem("TTS voice", pystray.Menu(*[radio("tts_voice", v) for v in VOICES])),
+                    pystray.MenuItem(
+                        "TTS speed",
+                        pystray.Menu(
+                            radio("tts_speed", 0.8, "0.8×"),
+                            radio("tts_speed", 1.0, "1.0×"),
+                            radio("tts_speed", 1.2, "1.2×"),
+                            radio("tts_speed", 1.4, "1.4×"),
+                        ),
+                    ),
                     bool_item("Wake word enabled", "wake_word_enabled"),
                     pystray.MenuItem("Wake word", pystray.Menu(*[radio("wake_word", w) for w in WAKE_WORDS])),
                     bool_item("Auto-endpoint", "auto_endpoint"),
@@ -106,6 +123,7 @@ class Tray:
                             radio("llm_num_ctx", 8192, "8192"),
                         ),
                     ),
+                    pystray.MenuItem("Reconnect Ollama", lambda *_: self.app.reconnect_ollama()),
                 ),
             ),
             pystray.MenuItem(

@@ -19,6 +19,7 @@ class Settings:
     stt_compute_type: str = "int8_float16"
     llm_num_ctx: int = 4096
     tts_voice: str = "af_heart"
+    tts_speed: float = 1.0
     wake_word: str = "hey_jarvis"
     wake_word_enabled: bool = True
     wake_threshold: float = 0.5
@@ -50,6 +51,10 @@ class Settings:
     tool_timeout_sec: float = 20.0
     max_tool_rounds: int = 4
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
+    # UI theme: a preset name from bob.ui.theme.PRESETS plus per-slot overrides
+    # (e.g. {"accent": "#ff8800", "font_family": "Consolas", "appearance": "light"}).
+    theme: str = "midnight"
+    theme_overrides: dict[str, str] = field(default_factory=dict)
 
     def save(self, path: Path = CONFIG_PATH) -> None:
         path.write_text(yaml.safe_dump(asdict(self), sort_keys=False), encoding="utf-8")
@@ -82,4 +87,8 @@ def load_settings(path: Path = CONFIG_PATH) -> Settings:
         if sec > 0:
             coerced["endpoint_silence_ms"] = int(sec * 1000)
             coerced.setdefault("auto_endpoint", True)
+    if not isinstance(coerced.get("theme_overrides", {}), dict):
+        coerced["theme_overrides"] = {}
+    if "theme" in coerced:
+        coerced["theme"] = str(coerced["theme"] or "midnight")
     return Settings(**coerced)
