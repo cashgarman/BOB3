@@ -9,15 +9,15 @@ from collections.abc import Callable, Sequence
 import customtkinter as ctk
 
 from bob.audio import WAVE_BARS
+from bob.debug_log import dbg
 from bob.state import State
 from bob.ui import theme as theming
 from bob.ui.theme import Theme, set_role
 from bob.ui.transcript import paint_transcript
 
 TOAST_W = 400
-TOAST_H = 292
+TOAST_H = 252
 TRANSCRIPT_H = 120
-METER_H = 6
 MARGIN = 16
 
 
@@ -121,6 +121,8 @@ class ListenToast(ctk.CTkToplevel):
         self._messages: list[dict] = []
         self._pending_user = ""
         self._pending_reply = ""
+        self._detail = ""
+        self._stat_values: dict[str, float | None] = {"gpu": None, "vram": None, "cpu": None}
         self.overrideredirect(True)
         self.resizable(False, False)
         set_role(self, "skip")
@@ -204,65 +206,24 @@ class ListenToast(ctk.CTkToplevel):
         )
         self.meta.pack(fill="x")
 
-        self.meters = ctk.CTkFrame(inner, fg_color="transparent")
-        self.meters.pack(fill="x", pady=(6, 0))
-        self.gpu_bar, self.gpu_pct = self._meter(self.meters, "GPU", stretch=1.35)
-        self.vram_bar, self.vram_pct = self._meter(self.meters, "VRAM", stretch=1.0)
-        self.cpu_bar, self.cpu_pct = self._meter(self.meters, "CPU", stretch=1.0, pad_right=0)
-
-        for widget in (self, inner, header, self.app_name, self.status, self.wave, self.meta, self.meters):
+        for widget in (self, inner, header, self.app_name, self.status, self.wave, self.meta):
             widget.bind("<Button-1>", self._clicked)
         self.wave.bind("<Configure>", lambda _e: self._paint())
         self.withdraw()
         self.after(20, self._init_native)
 
-    def _meter(
-        self,
-        parent: ctk.CTkFrame,
-        label: str,
-        *,
-        stretch: float = 1.0,
-        pad_right: int = 8,
-    ) -> tuple[ctk.CTkProgressBar, ctk.CTkLabel]:
-        theme = theming.current()
-        col = ctk.CTkFrame(parent, fg_color="transparent")
-        col.pack(side="left", fill="x", expand=True, padx=(0, pad_right))
-        col.grid_columnconfigure(1, weight=max(1, int(stretch * 10)))
-
-        name = set_role(
-            ctk.CTkLabel(
-                col,
-                text=label,
-                font=theme.font(10),
-                text_color=theme.text_muted,
-                anchor="w",
-                width=42,
-            ),
-            "muted",
-        )
-        name.grid(row=0, column=0, sticky="w")
-
-        bar = ctk.CTkProgressBar(
-            col,
-            height=METER_H,
-            **theme.progress(theme.state_color(self._state)),
-        )
-        bar.grid(row=0, column=1, sticky="ew", padx=(4, 0))
-        bar.set(0)
-
-        pct = set_role(
-            ctk.CTkLabel(
-                col,
-                text="—",
-                font=theme.font(10),
-                text_color=theme.text_muted,
-                anchor="e",
-                width=34,
-            ),
-            "muted",
-        )
-        pct.grid(row=0, column=2, sticky="e", padx=(4, 0))
-        return bar, pct
+    def _sync_meta(self) -> None:
+        parts: list[str] = []
+        if self._detail:
+            parts.append(self._detail)
+        stats: list[str] = []
+        for key, label in (("gpu", "GPU"), ("vram", "VRAM"), ("cpu", "CPU")):
+            value = self._stat_values.get(key)
+            if value is not None:
+                stats.append(f"{label} {int(round(float(value) * 100))}%")
+        if stats:
+            parts.append(" · ".join(stats))
+        self.meta.configure(text=" · ".join(parts))
 
     def apply_theme(self, theme: Theme) -> None:
         theming.restyle(self, theme)  # the toplevel itself is role "skip": it is a card, not a window
@@ -270,9 +231,6 @@ class ListenToast(ctk.CTkToplevel):
         self.inner.configure(fg_color=theme.surface)
         self.wave.configure(bg=theme.surface)
         self.status.configure(text_color=theme.state_color(self._state))
-        meter_color = theme.state_color(self._state)
-        for bar in (self.gpu_bar, self.vram_bar, self.cpu_bar):
-            bar.configure(**theme.progress(meter_color))
         self._sync_pin_button()
         self._style()
         self._paint()
@@ -285,6 +243,26 @@ class ListenToast(ctk.CTkToplevel):
         return self._pinned
 
     def present(self) -> None:
+        if self._open:
+            try:
+                if self.winfo_viewable():
+                    return
+            except Exception:
+                pass
+        master = self.master
+        # #region agent log
+        dbg(
+            "listen_toast.py:present",
+            "toast present",
+            data={
+                "master_title": getattr(master, "title", lambda: "")(),
+                "master_state": master.state() if master is not None else None,
+                "master_viewable": bool(getattr(master, "winfo_viewable", lambda: False)()),
+            },
+            hypothesis_id="T3",
+            run_id="tray-v7",
+        )
+        # #endregion
         fg = 0
         if sys.platform == "win32":
             import ctypes
@@ -316,10 +294,8 @@ class ListenToast(ctk.CTkToplevel):
         self._state = state
         color = theming.current().state_color(state)
         self.status.configure(text=state.value.upper(), text_color=color)
-        for bar in (self.gpu_bar, self.vram_bar, self.cpu_bar):
-            bar.configure(progress_color=color)
-        if detail:
-            self.meta.configure(text=detail)
+        self._detail = detail or ""
+        self._sync_meta()
         if not self._open:
             self.present()
 
@@ -331,20 +307,13 @@ class ListenToast(ctk.CTkToplevel):
     ) -> None:
         if not self._open:
             return
-        color = theming.current().state_color(self._state)
-        for bar, label, value in (
-            (self.gpu_bar, self.gpu_pct, gpu),
-            (self.vram_bar, self.vram_pct, vram),
-            (self.cpu_bar, self.cpu_pct, cpu),
-        ):
-            bar.configure(progress_color=color)
-            if value is None:
-                bar.set(0.0)
-                label.configure(text="—")
-            else:
-                pct = max(0.0, min(1.0, float(value)))
-                bar.set(pct)
-                label.configure(text=f"{int(round(pct * 100))}%")
+        changed = False
+        for key, value in (("gpu", gpu), ("vram", vram), ("cpu", cpu)):
+            if self._stat_values.get(key) != value:
+                self._stat_values[key] = value
+                changed = True
+        if changed:
+            self._sync_meta()
 
     def set_transcript(
         self,

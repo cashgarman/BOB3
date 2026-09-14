@@ -34,6 +34,112 @@ def apply_process_app_id() -> None:
         return
 
 
+def tk_root_hwnd(window) -> int:
+    if sys.platform != "win32":
+        return int(window.winfo_id())
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    hwnd = int(window.winfo_id())
+    root = user32.GetAncestor(hwnd, 2)  # GA_ROOT
+    return int(root or hwnd)
+
+
+def hide_from_taskbar(window) -> None:
+    """Keep a Tk window out of the taskbar and Alt+Tab list."""
+    if sys.platform != "win32":
+        return
+    try:
+        window.attributes("-toolwindow", True)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        GWL_EXSTYLE = -20
+        WS_EX_TOOLWINDOW = 0x00000080
+        WS_EX_NOACTIVATE = 0x08000000
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+
+        user32 = ctypes.windll.user32
+        user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+        user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+        user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+        hwnd = tk_root_hwnd(window)
+        style = int(user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE))
+        style |= WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+        user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
+        user32.SetWindowPos(
+            hwnd,
+            0,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+    except Exception:
+        return
+
+
+def show_in_taskbar(window) -> None:
+    """Restore normal taskbar presence when the user explicitly opens a window."""
+    if sys.platform != "win32":
+        return
+    try:
+        window.attributes("-toolwindow", False)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        GWL_EXSTYLE = -20
+        WS_EX_TOOLWINDOW = 0x00000080
+        SWP_NOSIZE = 0x0001
+        SWP_NOMOVE = 0x0002
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        SWP_FRAMECHANGED = 0x0020
+
+        user32 = ctypes.windll.user32
+        user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+        user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+        user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+        hwnd = tk_root_hwnd(window)
+        style = int(user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE))
+        style &= ~WS_EX_TOOLWINDOW
+        user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
+        user32.SetWindowPos(
+            hwnd,
+            0,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+    except Exception:
+        return
+
+
+def window_debug_snapshot(window) -> dict:
+    try:
+        return {
+            "title": window.title(),
+            "tk_state": window.state(),
+            "viewable": bool(window.winfo_viewable()),
+            "alpha": float(window.attributes("-alpha")),
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def apply_tk_icon(window) -> None:
     if sys.platform != "win32":
         return

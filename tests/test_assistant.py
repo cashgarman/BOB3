@@ -290,14 +290,34 @@ def test_assistant_apply_settings_dict_theme(ui, tmp_path, monkeypatch):
     assistant.apply_theme.assert_called()
 
 
-def test_assistant_set_state_drives_toast(ui, tmp_path, monkeypatch):
+def test_opening_overlay_syncs_current_state(ui, tmp_path, monkeypatch):
+    from tests.helpers import pump
+
+    assistant, *_ = _make_assistant(tmp_path, monkeypatch)
+    assistant.overlay = ui
+    assistant.hud = None
+    assistant.toast = None
+    assistant.tray = MagicMock()
+    assistant._ui = lambda fn: fn()
+    assistant.state = State.IDLE
+    assistant._state_detail = "ready"
+    assistant.settings.show_overlay = False
+    ui.set_user_visible(False)
+    ui.set_state(State.LOADING)
+    pump(ui.master, 2)
+    assert ui.status.cget("text") == "LOADING"
+
+    assistant.set_overlay_visible(True, persist=False)
+    pump(ui.master, 3)
+    assert ui.is_user_visible() is True
+    assert ui.status.cget("text") == "IDLE"
     from bob.ui.listen_toast import ListenToast
     from tests.helpers import pump
 
     assistant, *_ = _make_assistant(tmp_path, monkeypatch)
     assistant.overlay = ui
     assistant.hud = None
-    toast = ListenToast(ui)
+    toast = ListenToast(ui.master)
     pump(ui, 3)
     assistant.toast = toast
     assistant._ui = lambda fn: fn()
@@ -320,7 +340,7 @@ def test_assistant_set_state_keeps_pinned_toast_on_idle(ui, tmp_path, monkeypatc
     assistant, *_ = _make_assistant(tmp_path, monkeypatch)
     assistant.overlay = ui
     assistant.hud = None
-    toast = ListenToast(ui)
+    toast = ListenToast(ui.master)
     pump(ui, 3)
     assistant.toast = toast
     assistant._ui = lambda fn: fn()

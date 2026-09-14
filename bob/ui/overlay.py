@@ -5,15 +5,20 @@ from collections.abc import Callable, Sequence
 
 import customtkinter as ctk
 
+from bob.debug_log import dbg
 from bob.state import State
 from bob.ui import theme as theming
 from bob.ui.theme import Theme, set_role
 from bob.ui.transcript import paint_transcript
+from bob.win32_app import hide_from_taskbar, show_in_taskbar, window_debug_snapshot
 
 
-class Overlay(ctk.CTk):
+class Overlay(ctk.CTkToplevel):
+    """Optional main Bob window. Hidden by default; only shown when the user asks."""
+
     def __init__(
         self,
+        master: ctk.CTk,
         on_toggle: Callable[[], None],
         on_quit: Callable[[], None],
         on_submit: Callable[[str], None] | None = None,
@@ -21,15 +26,15 @@ class Overlay(ctk.CTk):
         *,
         visible: bool = True,
     ) -> None:
+        super().__init__(master)
         theme = theming.current()
-        ctk.set_appearance_mode(theme.appearance)
-        ctk.set_default_color_theme("dark-blue")
-        super().__init__()
         self.on_toggle = on_toggle
         self.on_quit = on_quit
         self.on_submit = on_submit
         self.on_settings = on_settings
         self.on_hide = None
+        self._user_visible = bool(visible)
+        self._saved_geometry = "560x460+40+40"
         self._messages: list[dict] = []
         self._pending_user = ""
         self._pending_reply = ""
@@ -38,7 +43,7 @@ class Overlay(ctk.CTk):
         from bob.win32_app import apply_tk_icon
 
         apply_tk_icon(self)
-        self.geometry("560x460+40+40")
+        self.geometry(self._saved_geometry)
         self.minsize(420, 320)
         self.resizable(True, True)
         self.attributes("-topmost", True)
@@ -99,8 +104,36 @@ class Overlay(ctk.CTk):
         )
         self.send_btn.pack(side="right", padx=(8, 0))
 
-        if not visible:
+        if visible:
+            show_in_taskbar(self)
+        else:
             self.withdraw()
+            hide_from_taskbar(self)
+            # #region agent log
+            dbg(
+                "overlay.py:__init__",
+                "overlay created hidden",
+                data=window_debug_snapshot(self),
+                hypothesis_id="T2",
+                run_id="tray-v7",
+            )
+            # #endregion
+
+    def is_user_visible(self) -> bool:
+        return self._user_visible
+
+    def set_user_visible(self, visible: bool) -> None:
+        visible = bool(visible)
+        if visible:
+            if self._user_visible and self.state() != "withdrawn":
+                return
+            self._user_visible = True
+            show_in_taskbar(self)
+            self.present(take_focus=True)
+            return
+        if not self._user_visible and self.state() == "withdrawn":
+            return
+        self.hide()
 
     def _open_settings(self) -> None:
         if self.on_settings:
@@ -153,32 +186,49 @@ class Overlay(ctk.CTk):
         self._paint()
 
     def is_viewable(self) -> bool:
+        if not self._user_visible:
+            return False
         try:
             return self.state() == "normal" and bool(self.winfo_viewable())
         except Exception:
             return False
 
-    def present(self) -> None:
+    def present(self, *, take_focus: bool = False) -> None:
+        if not self._user_visible:
+            # #region agent log
+            dbg(
+                "overlay.py:present",
+                "skipped overlay present",
+                data={"take_focus": take_focus, **window_debug_snapshot(self)},
+                hypothesis_id="T2",
+                run_id="tray-v7",
+            )
+            # #endregion
+            return
         try:
             try:
-                if self.state() != "normal":
-                    self.state("normal")
+                geo = self.geometry()
+                if geo and "+" in geo and "-10000" not in geo:
+                    self._saved_geometry = geo
             except Exception:
                 pass
+            if self.state() != "normal":
+                self.state("normal")
             self.deiconify()
             self.lift()
             self.attributes("-topmost", True)
-            self.focus_force()
-            if sys.platform == "win32":
-                self.update_idletasks()
-                import ctypes
+            if take_focus:
+                self.focus_force()
+                if sys.platform == "win32":
+                    self.update_idletasks()
+                    import ctypes
 
-                hwnd = int(self.winfo_id())
-                user32 = ctypes.windll.user32
-                root = user32.GetAncestor(hwnd, 2)  # GA_ROOT
-                hwnd = int(root or hwnd)
-                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                user32.SetForegroundWindow(hwnd)
+                    hwnd = int(self.winfo_id())
+                    user32 = ctypes.windll.user32
+                    root = user32.GetAncestor(hwnd, 2)  # GA_ROOT
+                    hwnd = int(root or hwnd)
+                    user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    user32.SetForegroundWindow(hwnd)
         except Exception:
             try:
                 self.deiconify()
@@ -192,10 +242,21 @@ class Overlay(ctk.CTk):
         paint_transcript(self.transcript, self._messages, self._pending_user, self._pending_reply)
 
     def show(self) -> None:
-        self.present()
+        self.set_user_visible(True)
 
     def hide(self) -> None:
+        self._user_visible = False
         self.withdraw()
+        hide_from_taskbar(self)
+        # #region agent log
+        dbg(
+            "overlay.py:hide",
+            "overlay hidden",
+            data=window_debug_snapshot(self),
+            hypothesis_id="T2",
+            run_id="tray-v7",
+        )
+        # #endregion
         if self.on_hide:
             self.on_hide()
 

@@ -11,11 +11,13 @@ from typing import Any
 import httpx
 
 from bob.prompts import load_system_prompt, load_tool_guidance
+from bob.debug_log import dbg
 
 log = logging.getLogger(__name__)
 
 LARGE_MODEL_BYTES = 6 * 1024 * 1024 * 1024
 
+_THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 _PREAMBLE_RE = re.compile(
     r"\b(let me check|i(?:['’]ll| will) (?:check|look|find)|give me a (?:moment|second))\b",
     re.IGNORECASE,
@@ -145,11 +147,24 @@ class OllamaChat:
         self.session_summary = summary
 
     def _thinks(self) -> bool:
-        return "qwen3" in (self.model or "").lower()
+        name = (self.model or "").lower()
+        return any(tag in name for tag in ("qwen3", "deepseek-r1", "gpt-oss"))
 
     def _apply_think(self, payload: dict[str, Any]) -> None:
-        if self._thinks():
-            payload["think"] = False
+        if not self._thinks():
+            return
+        payload["think"] = False
+        payload["reasoning_effort"] = "none"
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return
+        payload["messages"] = [dict(msg) for msg in messages]
+        for msg in reversed(payload["messages"]):
+            if msg.get("role") == "user":
+                text = str(msg.get("content") or "")
+                if "/no_think" not in text:
+                    msg["content"] = (text.rstrip() + "\n/no_think").strip()
+                break
 
     def _system(self, with_tools: bool = False) -> str:
         parts = [load_system_prompt()]
@@ -354,6 +369,8 @@ class OllamaChat:
         parts: list[str] = []
         calls: list[dict[str, Any]] = []
         first_token = True
+        streamed = False
+        thinking_chars = 0
         t0 = time.perf_counter()
         with httpx.Client(timeout=STREAM_TIMEOUT) as client:
             with client.stream("POST", f"{self.host}/api/chat", json=payload) as resp:
@@ -373,19 +390,51 @@ class OllamaChat:
                     if data.get("error"):
                         raise RuntimeError(str(data["error"]))
                     message = data.get("message") or {}
+                    thinking = message.get("thinking") or message.get("reasoning") or ""
+                    if thinking:
+                        thinking_chars += len(str(thinking))
                     requested = message.get("tool_calls") or []
                     if requested:
                         calls.extend(requested)
-                    chunk = message.get("content") or ""
+                    chunk = _THINK_RE.sub("", message.get("content") or "")
                     if chunk:
                         parts.append(chunk)
+                    if chunk and not calls:
+                        visible = "".join(parts)
+                        if not (tools and _is_tool_preamble(visible)):
+                            piece = visible if not streamed else chunk
+                            if first_token:
+                                self.last_ttft_ms = (time.perf_counter() - t0) * 1000.0
+                                first_token = False
+                            if spoken is not None:
+                                spoken.append(piece)
+                            streamed = True
+                            yield piece
                     if data.get("done"):
                         self._record_eval(data)
                         break
         content = "".join(parts)
         cancelled = cancel is not None and cancel.is_set()
+        # #region agent log
+        dbg(
+            "llm.py:_round",
+            "llm round done",
+            data={
+                "think": payload.get("think"),
+                "thinking_chars": thinking_chars,
+                "content_len": len(content),
+                "streamed": streamed,
+                "ttft_ms": self.last_ttft_ms,
+                "eval_count": self.last_eval_count,
+                "eval_ms": self.last_eval_ms,
+                "calls": len(calls),
+            },
+            hypothesis_id="Q1",
+            run_id="think-v9",
+        )
+        # #endregion
         # Hold back tool-round narration and any deferral while tools are offered.
-        if not calls and content:
+        if not streamed and not calls and content:
             if tools and _is_tool_preamble(content) and not cancelled:
                 return content, calls
             if first_token:
@@ -393,7 +442,7 @@ class OllamaChat:
             if spoken is not None:
                 spoken.append(content)
             yield content
-        elif cancelled and content.strip() and spoken is not None:
+        elif cancelled and content.strip() and spoken is not None and not streamed:
             spoken.append(content)
         return content, calls
 

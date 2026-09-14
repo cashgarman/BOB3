@@ -53,6 +53,18 @@ def find_widget(root: tk.Misc, cls: type | tuple[type, ...] | None = None, text:
     return matches[0]
 
 
+def destroy_extra_toplevels(root: tk.Misc, keep: tk.Misc | None = None) -> None:
+    for child in list(root.winfo_children()):
+        if keep is not None and child is keep:
+            continue
+        if isinstance(child, (ctk.CTkToplevel, tk.Toplevel)):
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+    pump(root, 1)
+
+
 def destroy_toplevels(root: tk.Misc) -> None:
     for child in list(root.winfo_children()):
         if isinstance(child, (ctk.CTkToplevel, tk.Toplevel)):

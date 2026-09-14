@@ -9,7 +9,7 @@ from tests.helpers import pump, transcript_text
 
 def test_toast_present_hide_and_click(ui):
     clicks = []
-    toast = ListenToast(ui, on_click=lambda: clicks.append(1))
+    toast = ListenToast(ui.master, on_click=lambda: clicks.append(1))
     pump(ui, 3)
     assert toast.is_open() is False
 
@@ -28,7 +28,7 @@ def test_toast_present_hide_and_click(ui):
 
 
 def test_toast_set_state_opens_when_closed(ui):
-    toast = ListenToast(ui)
+    toast = ListenToast(ui.master)
     pump(ui, 3)
     toast.set_state(State.THINKING, "tool: clock")
     pump(ui)
@@ -39,7 +39,7 @@ def test_toast_set_state_opens_when_closed(ui):
 
 
 def test_toast_waveform_while_open(ui):
-    toast = ListenToast(ui)
+    toast = ListenToast(ui.master)
     pump(ui, 3)
     toast.present()
     pump(ui)
@@ -53,7 +53,7 @@ def test_toast_waveform_while_open(ui):
 
 
 def test_toast_waveform_ignored_when_closed(ui):
-    toast = ListenToast(ui)
+    toast = ListenToast(ui.master)
     pump(ui, 3)
     before = list(toast._shown)
     toast.set_waveform([1.0] * WAVE_BARS)
@@ -62,7 +62,7 @@ def test_toast_waveform_ignored_when_closed(ui):
 
 
 def test_toast_apply_theme(ui):
-    toast = ListenToast(ui)
+    toast = ListenToast(ui.master)
     pump(ui, 3)
     toast.set_state(State.SPEAKING)
     forest = theming.preset("forest")
@@ -73,7 +73,7 @@ def test_toast_apply_theme(ui):
 
 
 def test_toast_transcript(ui):
-    toast = ListenToast(ui)
+    toast = ListenToast(ui.master)
     pump(ui, 3)
     toast.set_transcript(
         [{"role": "user", "content": "Hello"}],
@@ -87,7 +87,7 @@ def test_toast_transcript(ui):
 
 
 def test_toast_pin_prevents_hide(ui):
-    toast = ListenToast(ui)
+    toast = ListenToast(ui.master)
     pump(ui, 3)
     toast.present()
     pump(ui)
@@ -106,7 +106,7 @@ def test_toast_pin_prevents_hide(ui):
 
 def test_toast_pin_button_does_not_toggle_listen(ui):
     clicks = []
-    toast = ListenToast(ui, on_click=lambda: clicks.append(1))
+    toast = ListenToast(ui.master, on_click=lambda: clicks.append(1))
     pump(ui, 3)
     toast.pin_btn.invoke()
     pump(ui)
@@ -115,16 +115,29 @@ def test_toast_pin_button_does_not_toggle_listen(ui):
     toast.destroy()
 
 
+def test_toast_present_keeps_hidden_root(ui):
+    ui.set_user_visible(False)
+    pump(ui.master, 3)
+    toast = ListenToast(ui.master.master)
+    pump(ui.master, 3)
+    toast.present()
+    pump(ui.master, 3)
+    assert toast.is_open() is True
+    assert ui.is_viewable() is False
+    assert ui.master.state() == "withdrawn"
+    toast.destroy()
+
+
 def test_toast_set_stats_updates_meters(ui):
-    toast = ListenToast(ui)
+    toast = ListenToast(ui.master)
     pump(ui, 3)
     toast.present()
     pump(ui)
     toast.set_state(State.THINKING, "ollama")
     toast.set_stats(gpu=0.42, vram=0.67, cpu=0.15)
     pump(ui)
-    assert abs(toast.gpu_bar.get() - 0.42) < 1e-6
-    assert toast.gpu_pct.cget("text") == "42%"
-    assert toast.vram_pct.cget("text") == "67%"
-    assert toast.cpu_pct.cget("text") == "15%"
+    text = toast.meta.cget("text")
+    assert "GPU 42%" in text
+    assert "VRAM 67%" in text
+    assert "CPU 15%" in text
     toast.destroy()

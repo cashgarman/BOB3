@@ -98,12 +98,20 @@ def test_overlay_hide_calls_on_hide(ui):
 
 
 def test_overlay_present_and_is_viewable(ui):
-    ui.present()
+    ui.set_user_visible(True)
     pump(ui)
     assert ui.is_viewable() is True
     ui.hide()
     pump(ui)
     assert ui.is_viewable() is False
+    assert ui.is_user_visible() is False
+
+
+def test_overlay_hidden_by_default(ui):
+    ui.set_user_visible(False)
+    pump(ui.master, 3)
+    assert ui.is_viewable() is False
+    assert ui.state() == "withdrawn"
 
 
 def test_overlay_apply_theme(ui):

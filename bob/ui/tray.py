@@ -51,18 +51,18 @@ class Tray:
         return self.app.settings
 
     def _schedule(self, fn: Callable[[], None]) -> None:
-        overlay = getattr(self.app, "overlay", None)
-        if overlay is None:
+        host = getattr(self.app, "root", None) or getattr(self.app, "overlay", None)
+        if host is None:
             fn()
             return
         try:
-            overlay.after(0, fn)
+            host.after(0, fn)
         except Exception:
             fn()
 
     def _cancel_animation_timer(self) -> None:
-        overlay = getattr(self.app, "overlay", None)
-        if overlay is None or self._anim_after_id is None:
+        host = getattr(self.app, "root", None) or getattr(self.app, "overlay", None)
+        if host is None or self._anim_after_id is None:
             self._anim_after_id = None
             return
         try:
@@ -91,8 +91,8 @@ class Tray:
 
         self._apply_icon(image, title)
 
-        overlay = getattr(self.app, "overlay", None)
-        if overlay is None or not uses_animation(state):
+        host = getattr(self.app, "root", None) or getattr(self.app, "overlay", None)
+        if host is None or not uses_animation(state):
             return
 
         def schedule_next() -> None:
@@ -100,7 +100,7 @@ class Tray:
                 if self._state is not state or not uses_animation(self._state):
                     self._anim_after_id = None
                     return
-                self._anim_after_id = overlay.after(interval, self._animation_tick)
+                self._anim_after_id = host.after(interval, self._animation_tick)
 
         self._schedule(schedule_next)
 
@@ -124,10 +124,10 @@ class Tray:
         def apply() -> None:
             self._apply_icon(image, title)
             if uses_animation(state):
-                overlay = getattr(self.app, "overlay", None)
-                if overlay is not None:
+                host = getattr(self.app, "root", None) or getattr(self.app, "overlay", None)
+                if host is not None:
                     with self._lock:
-                        self._anim_after_id = overlay.after(interval, self._animation_tick)
+                        self._anim_after_id = host.after(interval, self._animation_tick)
 
         self._schedule(apply)
 

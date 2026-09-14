@@ -3,9 +3,12 @@ from __future__ import annotations
 import ctypes
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from ctypes import wintypes
+
+from bob.debug_log import dbg
 
 
 @dataclass(frozen=True)
@@ -19,7 +22,27 @@ class _FILETIME(ctypes.Structure):
     _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
 
 
+class _NVMLUtilization(ctypes.Structure):
+    _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+
+
+class _NVMLMemory(ctypes.Structure):
+    _fields_ = [
+        ("total", ctypes.c_ulonglong),
+        ("free", ctypes.c_ulonglong),
+        ("used", ctypes.c_ulonglong),
+    ]
+
+
 _SAMPLER: "UsageSampler | None" = None
+_SAMPLER_THREAD: threading.Thread | None = None
+_SAMPLER_STOP = threading.Event()
+_SAMPLER_LOCK = threading.Lock()
+_CACHED = UsageStats()
+_NVML = None
+_NVML_DEVICE = None
+_NVML_FAILED = False
+_SAMPLE_LOGS = 0
 
 
 class UsageSampler:
@@ -36,31 +59,138 @@ class UsageSampler:
         now = time.monotonic()
         if now - self._last_at < self.interval_sec:
             return self._last
-        gpu, vram = _nvidia_usage()
+        gpu, vram, source = _nvidia_usage()
         cpu = _cpu_usage(self)
         self._last = UsageStats(gpu=gpu, vram=vram, cpu=cpu)
         self._last_at = now
+        # #region agent log
+        global _SAMPLE_LOGS
+        if _SAMPLE_LOGS < 8:
+            _SAMPLE_LOGS += 1
+            dbg(
+                "system_stats.py:sample",
+                "usage sample",
+                data={"source": source, "gpu": gpu, "vram": vram, "cpu": cpu, "n": _SAMPLE_LOGS},
+                hypothesis_id="S1",
+                run_id="tray-v8",
+            )
+        # #endregion
         return self._last
 
 
 def sample_usage() -> UsageStats:
-    global _SAMPLER
+    global _SAMPLER, _SAMPLER_THREAD
     if _SAMPLER is None:
         _SAMPLER = UsageSampler()
-    return _SAMPLER.sample()
+    if _SAMPLER_THREAD is None or not _SAMPLER_THREAD.is_alive():
+        _SAMPLER_STOP.clear()
+        _SAMPLER_THREAD = threading.Thread(
+            target=_sampler_loop,
+            name="system-stats",
+            daemon=True,
+        )
+        _SAMPLER_THREAD.start()
+    with _SAMPLER_LOCK:
+        return _CACHED
 
 
-def _nvidia_usage() -> tuple[float | None, float | None]:
+def _sampler_loop() -> None:
+    global _CACHED
+    sampler = _SAMPLER
+    if sampler is None:
+        return
+    while not _SAMPLER_STOP.is_set():
+        stats = sampler.sample()
+        with _SAMPLER_LOCK:
+            _CACHED = stats
+        _SAMPLER_STOP.wait(sampler.interval_sec)
+
+
+def _nvidia_usage() -> tuple[float | None, float | None, str]:
+    gpu, vram = _nvml_usage()
+    if gpu is not None or vram is not None:
+        return gpu, vram, "nvml"
+    gpu, vram = _nvidia_smi_usage()
+    return gpu, vram, "nvidia-smi" if gpu is not None or vram is not None else "none"
+
+
+def _nvml_usage() -> tuple[float | None, float | None]:
+    global _NVML, _NVML_DEVICE, _NVML_FAILED
+    if sys.platform != "win32" or _NVML_FAILED:
+        return None, None
     try:
+        if _NVML is None:
+            nvml = ctypes.WinDLL("nvml.dll")
+            nvml.nvmlInit_v2.restype = ctypes.c_int
+            if nvml.nvmlInit_v2() != 0:
+                _NVML_FAILED = True
+                return None, None
+            handle = ctypes.c_void_p()
+            nvml.nvmlDeviceGetHandleByIndex_v2.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)]
+            nvml.nvmlDeviceGetHandleByIndex_v2.restype = ctypes.c_int
+            if nvml.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(handle)) != 0:
+                _NVML_FAILED = True
+                return None, None
+            nvml.nvmlDeviceGetUtilizationRates.argtypes = [ctypes.c_void_p, ctypes.POINTER(_NVMLUtilization)]
+            nvml.nvmlDeviceGetUtilizationRates.restype = ctypes.c_int
+            nvml.nvmlDeviceGetMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(_NVMLMemory)]
+            nvml.nvmlDeviceGetMemoryInfo.restype = ctypes.c_int
+            _NVML = nvml
+            _NVML_DEVICE = handle
+        util = _NVMLUtilization()
+        mem = _NVMLMemory()
+        gpu_ok = _NVML.nvmlDeviceGetUtilizationRates(_NVML_DEVICE, ctypes.byref(util)) == 0
+        mem_ok = _NVML.nvmlDeviceGetMemoryInfo(_NVML_DEVICE, ctypes.byref(mem)) == 0
+        gpu = max(0.0, min(1.0, util.gpu / 100.0)) if gpu_ok else None
+        vram = None
+        if mem_ok and mem.total:
+            vram = max(0.0, min(1.0, mem.used / mem.total))
+        return gpu, vram
+    except Exception:
+        _NVML_FAILED = True
+        return None, None
+
+
+def _hidden_subprocess_kwargs() -> dict:
+    kwargs: dict = {
+        "text": True,
+        "stderr": subprocess.DEVNULL,
+        "stdin": subprocess.DEVNULL,
+        "timeout": 1.0,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 1)
+        startupinfo.wShowWindow = 0
+        kwargs["startupinfo"] = startupinfo
+    return kwargs
+
+
+def _nvidia_smi_usage() -> tuple[float | None, float | None]:
+    try:
+        kwargs = _hidden_subprocess_kwargs()
+        # #region agent log
+        global _SAMPLE_LOGS
+        if _SAMPLE_LOGS < 8:
+            dbg(
+                "system_stats.py:_nvidia_smi_usage",
+                "spawning nvidia-smi",
+                data={
+                    "creationflags": kwargs.get("creationflags"),
+                    "has_startupinfo": "startupinfo" in kwargs,
+                },
+                hypothesis_id="S1",
+                run_id="tray-v8",
+            )
+        # #endregion
         out = subprocess.check_output(
             [
                 "nvidia-smi",
                 "--query-gpu=utilization.gpu,memory.used,memory.total",
                 "--format=csv,noheader,nounits",
             ],
-            text=True,
-            stderr=subprocess.DEVNULL,
-            timeout=1.0,
+            **kwargs,
         )
         line = out.strip().splitlines()[0]
         parts = [part.strip() for part in line.split(",")]

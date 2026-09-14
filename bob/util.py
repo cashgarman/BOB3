@@ -67,16 +67,23 @@ def split_speakable(buffer: str, first: bool = False) -> tuple[list[str], str]:
 
 def gpu_memory_line() -> str:
     import subprocess
+    import sys
 
     try:
+        kwargs = {
+            "text": True,
+            "stderr": subprocess.DEVNULL,
+            "stdin": subprocess.DEVNULL,
+        }
+        if sys.platform == "win32":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         out = subprocess.check_output(
             [
                 "nvidia-smi",
                 "--query-gpu=name,memory.used,memory.total",
                 "--format=csv,noheader",
             ],
-            text=True,
-            stderr=subprocess.DEVNULL,
+            **kwargs,
         )
         return out.strip().splitlines()[0]
     except Exception as exc:

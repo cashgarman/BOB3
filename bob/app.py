@@ -22,6 +22,7 @@ from bob.tts import TextToSpeech
 from bob.tts_stream import SpeechStreamer
 from bob.turn import SmartTurn, TurnGate
 from bob.ui.memories import MemoriesWindow
+from bob.ui.app_root import AppRoot
 from bob.ui.hud import TalkHud
 from bob.ui.listen_toast import ListenToast
 from bob.ui.overlay import Overlay
@@ -31,6 +32,7 @@ from bob.ui.theme import Theme
 from bob.ui.theme_dialog import ThemeDialog
 from bob.ui.tray import Tray
 from bob.system_stats import sample_usage
+from bob.debug_log import dbg
 from bob.util import gpu_memory_line, split_speakable
 from bob.vad import Endpointer
 from bob.latency import TurnTimer
@@ -79,6 +81,7 @@ class Assistant:
         # swaps in a fresh Event, so a pipeline thread that is still winding
         # down keeps seeing its own cancelled token instead of the new turn's.
         self._cancel = threading.Event()
+        self._state_detail = ""
         self._last_toggle = 0.0
         self._models_cache: tuple[float, list[tuple[str, bool]]] = (0.0, [])
         self._state_lock = threading.Lock()
@@ -86,6 +89,7 @@ class Assistant:
         self._chunk_q: queue.Queue = queue.Queue(maxsize=64)
         self._endpoint_armed = False
         self._barge_armed = False
+        self.root: AppRoot | None = None
         self.overlay: Overlay | None = None
         self.hud: TalkHud | None = None
         self.toast: ListenToast | None = None
@@ -154,7 +158,9 @@ class Assistant:
 
     def run(self) -> None:
         theming.set_current(theming.resolve_theme(self.settings))
+        self.root = AppRoot()
         self.overlay = Overlay(
+            self.root,
             self.toggle_listen,
             self.quit,
             on_submit=self.submit_text,
@@ -162,13 +168,14 @@ class Assistant:
             visible=self.settings.show_overlay,
         )
         self.overlay.on_hide = lambda: self.set_overlay_visible(False, persist=True)
-        self.hud = TalkHud(self.overlay, self.settings.hotkey)
-        self.toast = ListenToast(self.overlay, on_click=self.toggle_listen)
+        self.hud = TalkHud(self.root, self.settings.hotkey)
+        self.toast = ListenToast(self.root, on_click=self.toggle_listen)
+        sample_usage()
         self._refresh_talk()
         self._start_tray()
-        self.overlay.after(80, self._boot)
-        self.overlay.after(50, self._poll_level)
-        self.overlay.mainloop()
+        self.root.after(80, self._boot)
+        self.root.after(50, self._poll_level)
+        self.root.mainloop()
 
     def _boot(self) -> None:
         threading.Thread(target=self._boot_worker, name="boot", daemon=True).start()
@@ -190,11 +197,9 @@ class Assistant:
                 # (re)loaded from the tray or on the first turn.
                 ollama_ok = False
                 log.warning("Ollama unreachable at %s: %s", self.llm.host, exc)
-                self._ui(
-                    lambda: self.overlay.set_reply(
-                        f"Ollama is not reachable at {self.llm.host}. Start it, then use "
-                        "Models → Reconnect Ollama in the tray."
-                    )
+                self._surface_note(
+                    f"Ollama is not reachable at {self.llm.host}. Start it, then use "
+                    "Models → Reconnect Ollama in the tray."
                 )
             status("Speech recognition")
             try:
@@ -231,7 +236,7 @@ class Assistant:
                 self.memory.load()
             except Exception as exc:
                 log.exception("Memory failed to load")
-                self._ui(lambda: self.overlay.set_reply(f"Memory offline: {exc}"))
+                self._surface_note(f"Memory offline: {exc}")
             status("Tools")
             self._load_tools(status)
             status("Microphone")
@@ -248,7 +253,7 @@ class Assistant:
                     self.llm.preload()
                 except Exception as exc:
                     log.warning("Model preload failed: %s", exc)
-                    self._ui(lambda: self.overlay.set_reply(f"Model load failed: {exc}"))
+                    self._surface_note(f"Model load failed: {exc}")
             detail = self._ready_detail()
             self._set_state(State.IDLE, detail)
             if self.tray:
@@ -259,7 +264,7 @@ class Assistant:
             log.exception("Boot failed")
             self._toast_load(str(exc), title="Bob failed to start")
             self._set_state(State.ERROR, str(exc)[:80])
-            self._ui(lambda: self.overlay.set_reply(str(exc)))
+            self._surface_note(str(exc))
 
     def _notify_ready(self, detail: str = "") -> None:
         del detail
@@ -309,7 +314,7 @@ class Assistant:
             self.tools.errors.append(str(exc))
         if self.tools.errors:
             note = "Tools: " + "; ".join(self.tools.errors[:3])
-            self._ui(lambda: self.overlay.set_reply(note))
+            self._surface_note(note)
 
     def _reload_tools(self) -> None:
         threading.Thread(target=self._load_tools, name="tools", daemon=True).start()
@@ -320,7 +325,7 @@ class Assistant:
             self.tray.run_detached()
             self.tray.set_state(State.LOADING)
         except Exception:
-            self.set_overlay_visible(True, persist=False)
+            log.exception("Tray unavailable; continuing without system tray")
 
     def _tray_models(self) -> list[tuple[str, bool]]:
         """Ollama model list for menus. Cached so rebuilding the tray menu on the
@@ -345,7 +350,7 @@ class Assistant:
     def apply_setting(self, field: str, value) -> None:
         if field in RESTART_FIELDS and str(getattr(self.settings, field)) != str(value):
             self.settings.update(**{field: value})
-            self._ui(lambda: self.overlay.set_reply("Saved. Restart Bob to apply this setting."))
+            self._surface_note("Saved. Restart Bob to apply this setting.")
             if self.tray:
                 self.tray.refresh()
             return
@@ -409,7 +414,7 @@ class Assistant:
         if model_changed:
             threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
         if restart:
-            self._ui(lambda: self.overlay.set_reply("Some settings need a Bob restart (STT / sample rate)."))
+            self._surface_note("Some settings need a Bob restart (STT / sample rate).")
         if self.tray:
             self.tray.refresh()
 
@@ -472,7 +477,10 @@ class Assistant:
             self._configure_streaming()
 
     def set_overlay_visible(self, visible: bool, persist: bool = True) -> None:
-        self.settings.show_overlay = bool(visible)
+        visible = bool(visible)
+        if self.overlay and visible == self.settings.show_overlay and visible == self.overlay.is_user_visible():
+            return
+        self.settings.show_overlay = visible
         if persist:
             self.settings.save()
         if not self.overlay:
@@ -480,11 +488,12 @@ class Assistant:
 
         def apply():
             if visible:
-                self.overlay.show()
+                self.overlay.set_user_visible(True)
+                self._paint_overlay()
                 if self.hud:
                     self.hud.hide()
             else:
-                self.overlay.withdraw()
+                self.overlay.set_user_visible(False)
 
         self._ui(apply)
         if self.tray:
@@ -510,7 +519,7 @@ class Assistant:
                     self._settings_win = None
             models = [name for name, _ in self._tray_models()]
             self._settings_win = SettingsDialog(
-                self.overlay,
+                self.root,
                 self.settings,
                 self.apply_settings_dict,
                 models,
@@ -538,13 +547,7 @@ class Assistant:
                     self.audio.play(samples, sr)
             except Exception as exc:
                 log.warning("Voice preview failed: %s", exc)
-                if self.overlay:
-
-                    def notify() -> None:
-                        if self.overlay:
-                            self.overlay.set_reply(f"Voice preview failed: {exc}")
-
-                    self._ui(notify)
+                self._surface_note(f"Voice preview failed: {exc}")
 
         threading.Thread(target=work, name="voice-preview", daemon=True).start()
 
@@ -558,10 +561,10 @@ class Assistant:
                         return
                 except Exception:
                     self._theme_win = None
-            if self.overlay is None:
+            if self.root is None:
                 return
             self._theme_win = ThemeDialog(
-                self.overlay,
+                self.root,
                 self.settings,
                 on_preview=self.apply_theme,
                 on_save=self.save_theme,
@@ -643,7 +646,7 @@ class Assistant:
                 except Exception:
                     self._memories_win = None
             self._memories_win = MemoriesWindow(
-                self.overlay,
+                self.root,
                 rows_provider=self.memory.list_memories,
                 on_toggle=self.memory.set_enabled,
                 on_edit=self.memory.edit,
@@ -685,12 +688,12 @@ class Assistant:
             # Runs from tray / settings callbacks; an unhandled error here used
             # to leave Bob with no microphone and no message.
             log.exception("Audio restart failed")
-            self._ui(lambda: self.overlay.set_reply(f"Audio device error: {exc}"))
+            self._surface_note(f"Audio device error: {exc}")
             return
         if self.audio.input_device is None and self.settings.input_device:
             # AudioHub fell back to the default device because the saved one is gone.
             self.settings.update(input_device="")
-            self._ui(lambda: self.overlay.set_reply("Saved microphone not found; using the system default."))
+            self._surface_note("Saved microphone not found; using the system default.")
         if self.audio.output_device is None and self.settings.output_device:
             self.settings.update(output_device="")
         if listening:
@@ -701,7 +704,7 @@ class Assistant:
             self.wake.set_model(name)
             if self.wake.error:
                 log.warning("Wake word reload failed: %s", self.wake.error)
-                self._ui(lambda: self.overlay.set_reply(f"Wake word: {self.wake.error}"))
+                self._surface_note(f"Wake word: {self.wake.error}")
 
         threading.Thread(target=work, name="wakeword-reload", daemon=True).start()
 
@@ -749,7 +752,7 @@ class Assistant:
         except Exception as exc:
             log.warning("Model preload failed: %s", exc)
             self._toast_load(f"Model load failed: {exc}", title="Bob")
-            self._ui(lambda: self.overlay.set_reply(f"Model load failed: {exc}"))
+            self._surface_note(f"Model load failed: {exc}")
 
     def reconnect_ollama(self) -> None:
         threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
@@ -862,6 +865,15 @@ class Assistant:
             return
         self._last_toggle = now
         state = self.state
+        # #region agent log
+        dbg(
+            "app.py:_toggle_from_ui",
+            "toggle listen",
+            data={"state": state.value},
+            hypothesis_id="H3",
+            run_id="v6",
+        )
+        # #endregion
         if state == State.LOADING:
             return
         if state == State.ERROR:
@@ -881,6 +893,30 @@ class Assistant:
     def _overlay_viewable(self) -> bool:
         return bool(self.overlay and self.overlay.is_viewable())
 
+    def _overlay_should_update(self) -> bool:
+        return bool(self.overlay and self.overlay.is_user_visible())
+
+    def _paint_overlay(self) -> None:
+        if not self.overlay or not self.overlay.is_user_visible():
+            return
+        self.overlay.set_state(self.state, self._state_detail)
+        self.overlay.set_transcript(
+            list(self._turns[-MAX_SHOWN_MESSAGES:]),
+            self._pending_user,
+            self._pending_reply,
+        )
+
+    def _surface_note(self, text: str) -> None:
+        msg = (text or "").strip()
+        if not msg:
+            return
+
+        def apply() -> None:
+            if self._overlay_should_update() and self.overlay:
+                self.overlay.set_reply(msg)
+
+        self._ui(apply)
+
     def _present_talk(self, phase: str) -> None:
         def apply() -> None:
             if self.settings.show_overlay:
@@ -889,7 +925,6 @@ class Assistant:
                     iconic = bool(self.overlay) and self.overlay.state() == "iconic"
                 except Exception:
                     iconic = False
-                # Iconified Tk roots also hide Toplevels on Windows, so restore the overlay.
                 if self._overlay_viewable() or iconic:
                     self.overlay.set_phase(phase)
                     self.overlay.present()
@@ -912,7 +947,7 @@ class Assistant:
         pending_reply = self._pending_reply
 
         def apply() -> None:
-            if self.overlay:
+            if self._overlay_should_update() and self.overlay:
                 self.overlay.set_transcript(messages, pending_user, pending_reply)
             if self.hud:
                 self.hud.set_transcript(messages, pending_user, pending_reply)
@@ -1003,6 +1038,15 @@ class Assistant:
         def apply() -> None:
             if self.state == State.LOADING:
                 return
+            # #region agent log
+            dbg(
+                "app.py:submit_text",
+                "submit text",
+                data={"text_len": len(text), "state": self.state.value},
+                hypothesis_id="H3",
+                run_id="v6",
+            )
+            # #endregion
             if self.state == State.ERROR:
                 if getattr(self.stt, "_model", None) is None:
                     return
@@ -1079,20 +1123,63 @@ class Assistant:
         committed_assistant = False
         token = cancel or self._cancel
         self._reset_turn_mood()
+        # #region agent log
+        dbg(
+            "app.py:_pipeline",
+            "pipeline start",
+            data={"typed": bool(typed_text), "state": self.state.value},
+            hypothesis_id="H4",
+            run_id="v6",
+        )
+        # #endregion
         try:
             if typed_text:
                 user_text = typed_text.strip()
             else:
                 user_text = self.stt_stream.finalize()
+            samples = int(getattr(self.stt_stream, "total_samples", 0) or 0)
+            # #region agent log
+            dbg(
+                "app.py:_pipeline",
+                "after stt",
+                data={
+                    "typed": bool(typed_text),
+                    "user_empty": not bool((user_text or "").strip()),
+                    "user_len": len(user_text or ""),
+                    "samples": samples,
+                    "cancelled": token.is_set(),
+                },
+                hypothesis_id="P1",
+                run_id="tray-v8",
+            )
+            # #endregion
             if token.is_set():
                 return
-            too_short = (not typed_text) and self.stt_stream.total_samples < self.settings.sample_rate * 0.12
+            too_short = (not typed_text) and samples < self.settings.sample_rate * 0.12
             if too_short and not user_text.strip():
+                # #region agent log
+                dbg(
+                    "app.py:_pipeline",
+                    "abort too short",
+                    data={"samples": samples},
+                    hypothesis_id="P1",
+                    run_id="tray-v8",
+                )
+                # #endregion
                 self._talk_set_user("(too short)")
                 self._set_state(State.IDLE, self._ready_detail())
                 self._ui(self._restore_idle_ui)
                 return
             if not user_text.strip():
+                # #region agent log
+                dbg(
+                    "app.py:_pipeline",
+                    "abort no speech",
+                    data={"samples": samples},
+                    hypothesis_id="P2",
+                    run_id="tray-v8",
+                )
+                # #endregion
                 self._talk_set_user("(no speech detected)")
                 self._set_state(State.IDLE, self._ready_detail())
                 self._ui(self._restore_idle_ui)
@@ -1160,6 +1247,15 @@ class Assistant:
                     log.warning("Speech playback ended before completion")
                     self.speech.cancel()
         except Exception as exc:
+            # #region agent log
+            dbg(
+                "app.py:_pipeline",
+                "pipeline error",
+                data={"error": str(exc)},
+                hypothesis_id="H4",
+                run_id="v6",
+            )
+            # #endregion
             self._talk_set_reply(f"Error: {exc}")
             if started:
                 self.speech.cancel()
@@ -1174,6 +1270,21 @@ class Assistant:
             if not token.is_set() and self.state != State.LISTENING:
                 self._set_state(State.IDLE, self._ready_detail())
                 self._ui(self._restore_idle_ui)
+            # #region agent log
+            dbg(
+                "app.py:_pipeline",
+                "pipeline done",
+                data={
+                    "cancelled": token.is_set(),
+                    "state": self.state.value,
+                    "had_reply": bool(strip_mood_tags(full).strip()),
+                    "full_len": len(full or ""),
+                    "user_len": len(user_text or ""),
+                },
+                hypothesis_id="P3",
+                run_id="tray-v8",
+            )
+            # #endregion
             if assistant_text and user_text and self.settings.memory_autosave:
                 threading.Thread(
                     target=self._ingest_memory,
@@ -1226,22 +1337,32 @@ class Assistant:
         if self.overlay is None:
             return
         boost = min(1.0, self.audio.level * 8.0)
-        self.overlay.set_level(boost)
+        if self._overlay_should_update():
+            self.overlay.set_level(boost)
         if self.hud and self.hud.is_open():
             self.hud.set_level(boost)
         if self.toast and self.toast.is_open():
             self.toast.set_waveform(self.audio.waveform_bars())
-            stats = sample_usage()
-            self.toast.set_stats(stats.gpu, stats.vram, stats.cpu)
+            active = self.state in {State.LISTENING, State.THINKING, State.SPEAKING}
+            if active:
+                now = time.monotonic()
+                last = getattr(self, "_stats_ui_at", 0.0)
+                if now - last >= 2.0:
+                    self._stats_ui_at = now
+                    stats = sample_usage()
+                    self.toast.set_stats(stats.gpu, stats.vram, stats.cpu)
+        if self.root is None:
+            return
         if not self._stop.is_set():
-            self.overlay.after(50, self._poll_level)
+            self.root.after(50, self._poll_level)
 
     def _set_state(self, state: State, detail: str = "") -> None:
         with self._state_lock:
             self.state = state
+            self._state_detail = detail or ""
 
         def apply() -> None:
-            if self.overlay:
+            if self._overlay_should_update() and self.overlay:
                 self.overlay.set_state(state, detail)
             if self.hud and self.hud.is_open():
                 self.hud.set_state(state, detail)
@@ -1257,10 +1378,11 @@ class Assistant:
         self._ui(apply)
 
     def _ui(self, fn) -> None:
-        if self.overlay is None:
+        host = self.root or self.overlay
+        if host is None:
             return
         try:
-            self.overlay.ui(fn)
+            host.ui(fn)
         except Exception:
             pass
 
@@ -1290,6 +1412,8 @@ class Assistant:
             pass
         if self.overlay:
             self.overlay.destroy()
+        if self.root:
+            self.root.destroy()
 
 
 def run_check() -> int:
