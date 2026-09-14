@@ -92,7 +92,14 @@ class ParakeetSTT:
         snapshot_download(PARAKEET_HF_REPO, local_dir=str(self.download_root))
         return self.download_root
 
-    def transcribe(self, audio: np.ndarray, sample_rate: int, initial_prompt: str = "") -> str:
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        initial_prompt: str = "",
+        *,
+        allow_short_fillers: bool = False,
+    ) -> str:
         if self._model is None:
             raise RuntimeError("Parakeet is not loaded")
         if audio.size == 0:
@@ -107,7 +114,7 @@ class ParakeetSTT:
         except TypeError:
             result = self._model.recognize(pcm)
         raw = _result_text(result)
-        return clean_transcript(raw)
+        return clean_transcript(raw, allow_short_fillers=allow_short_fillers)
 
 
 def _result_text(result) -> str:

@@ -152,7 +152,6 @@ class Assistant:
     def run(self) -> None:
         theming.set_current(theming.resolve_theme(self.settings))
         self.overlay = Overlay(
-            self.settings.hotkey,
             self.toggle_listen,
             self.quit,
             on_submit=self.submit_text,
@@ -259,7 +258,6 @@ class Assistant:
                     self._ui(lambda: self.overlay.set_reply(f"Model load failed: {exc}"))
             detail = self._ready_detail()
             self._set_state(State.IDLE, detail)
-            self._ui(lambda: self.overlay.set_meta(detail))
             if self.tray:
                 self._ui(self.tray.refresh)
             self._toast_load(f"Ready — {detail}", title="Bob")
@@ -409,7 +407,6 @@ class Assistant:
             self._restart_audio()
         if model_changed:
             threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
-        self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
         if restart:
             self._ui(lambda: self.overlay.set_reply("Some settings need a Bob restart (STT / sample rate)."))
         if self.tray:
@@ -445,8 +442,6 @@ class Assistant:
             self._restart_hotkey()
             if self.hud:
                 self.hud.set_hotkey(str(value))
-            if self.overlay:
-                self.overlay.set_meta(self._ready_detail())
         elif field in {"input_device", "output_device"}:
             self._restart_audio()
         elif field == "show_overlay":
@@ -473,7 +468,6 @@ class Assistant:
                 )
                 self.settings.save()
             self._configure_streaming()
-        self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
 
     def set_overlay_visible(self, visible: bool, persist: bool = True) -> None:
         self.settings.show_overlay = bool(visible)
@@ -682,7 +676,6 @@ class Assistant:
             if self.wake.error:
                 log.warning("Wake word reload failed: %s", self.wake.error)
                 self._ui(lambda: self.overlay.set_reply(f"Wake word: {self.wake.error}"))
-            self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
 
         threading.Thread(target=work, name="wakeword-reload", daemon=True).start()
 
@@ -721,10 +714,8 @@ class Assistant:
     def _preload_safe(self) -> None:
         try:
             self._toast_load(f"Loading {self.llm.model}…")
-            self._ui(lambda: self.overlay.set_meta(f"Loading {self.llm.model} …"))
             self.llm.preload()
             self._models_cache = (0.0, [])
-            self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
             if self.tray:
                 self._ui(self.tray.refresh)
             self._toast_load(f"{self.llm.model} is ready", title="Bob")
@@ -732,7 +723,6 @@ class Assistant:
             log.warning("Model preload failed: %s", exc)
             self._toast_load(f"Model load failed: {exc}", title="Bob")
             self._ui(lambda: self.overlay.set_reply(f"Model load failed: {exc}"))
-            self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
 
     def reconnect_ollama(self) -> None:
         threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
@@ -1047,7 +1037,7 @@ class Assistant:
                 user_text = self.stt_stream.finalize()
             if token.is_set():
                 return
-            too_short = (not typed_text) and self.stt_stream.total_samples < self.settings.sample_rate * 0.25
+            too_short = (not typed_text) and self.stt_stream.total_samples < self.settings.sample_rate * 0.12
             if too_short and not user_text.strip():
                 self._talk_set_user("(too short)")
                 self._set_state(State.IDLE, self._ready_detail())
@@ -1065,6 +1055,7 @@ class Assistant:
                 memory_block = self.memory.retrieve(user_text, limit=int(self.settings.memory_max_inject))
             except Exception:
                 memory_block = ""
+            memory_block = self._prefetch_tool_context(user_text, memory_block)
             pending = ""
             full = ""
             for chunk in self.llm.chat(
@@ -1115,7 +1106,9 @@ class Assistant:
             if assistant_text:
                 self._commit_turn("assistant", assistant_text)
             if started:
-                self.speech.wait(epoch)
+                if not self.speech.wait(epoch, timeout=120.0):
+                    log.warning("Speech playback timed out; cancelling audio")
+                    self.speech.cancel()
         except Exception as exc:
             self._talk_set_reply(f"Error: {exc}")
             if started:
@@ -1135,6 +1128,20 @@ class Assistant:
                     daemon=True,
                 ).start()
 
+    def _prefetch_tool_context(self, user_text: str, memory_block: str) -> str:
+        from bob.llm import needs_conversation_log
+
+        if not self.settings.tools_enabled or "conversation_log" not in self.tools.names():
+            return memory_block
+        if not needs_conversation_log(user_text):
+            return memory_block
+        ctx = self.tools.context(chat=self.chat, session_id=self._session_id)
+        log_text = self.tools.invoke("conversation_log", {"limit": 40}, ctx=ctx)
+        block = f"Conversation log (for this chat):\n{log_text}"
+        if memory_block.strip():
+            return f"{block}\n\n{memory_block.strip()}"
+        return block
+
     def _tool_schemas(self) -> list[dict] | None:
         if not self.settings.tools_enabled:
             return None
@@ -1148,6 +1155,8 @@ class Assistant:
             status=lambda msg: self._set_state(State.THINKING, msg),
             mood=self.speech.mood,
             on_mood=self._apply_turn_mood,
+            chat=self.chat,
+            session_id=self._session_id,
         )
         result = self.tools.invoke(name, arguments, ctx=ctx, timeout=float(self.settings.tool_timeout_sec))
         self._set_state(State.THINKING, "ollama")

@@ -14,7 +14,6 @@ from bob.ui.transcript import paint_transcript
 class Overlay(ctk.CTk):
     def __init__(
         self,
-        hotkey: str,
         on_toggle: Callable[[], None],
         on_quit: Callable[[], None],
         on_submit: Callable[[str], None] | None = None,
@@ -72,19 +71,6 @@ class Overlay(ctk.CTk):
         )
         self.settings_btn.pack(side="right")
 
-        self.meta = set_role(
-            ctk.CTkLabel(
-                self,
-                text=f"Toggle listen  {hotkey.upper()}",
-                font=theme.font(12),
-                wraplength=520,
-                justify="left",
-                **theme.label_style(muted=True),
-            ),
-            "muted",
-        )
-        self.meta.pack(anchor="w", padx=16)
-
         self.level = ctk.CTkProgressBar(self, height=8, **theme.progress(theme.state_color(State.LOADING)))
         self.level.pack(fill="x", padx=16, pady=(10, 8))
         self.level.set(0)
@@ -132,13 +118,12 @@ class Overlay(ctk.CTk):
         self._paint()
 
     def set_state(self, state: State, detail: str = "") -> None:
+        del detail
         self._state = state
         label = state.value.upper()
         color = theming.current().state_color(state)
         self.status.configure(text=label, text_color=color)
         self.level.configure(progress_color=color)
-        if detail:
-            self.meta.configure(text=detail)
 
     def set_level(self, value: float) -> None:
         self.level.set(max(0.0, min(1.0, value)))
@@ -161,9 +146,6 @@ class Overlay(ctk.CTk):
     def set_reply(self, text: str) -> None:
         self._pending_reply = text or ""
         self._paint()
-
-    def set_meta(self, text: str) -> None:
-        self.meta.configure(text=text)
 
     def is_viewable(self) -> bool:
         try:

@@ -193,15 +193,32 @@ class StreamingTranscriber:
                     self._chunks[0] = head[remain:]
                     remain = 0
 
-    def _decode(self, audio: np.ndarray, prompt: str) -> str:
-        min_samples = int(self.sample_rate * 0.2)
+    def _real_speech_turn(self) -> bool:
+        return self._session_peak >= 0.02
+
+    def _decode(
+        self,
+        audio: np.ndarray,
+        prompt: str,
+        *,
+        allow_short_fillers: bool | None = None,
+    ) -> str:
+        if allow_short_fillers is None:
+            allow_short_fillers = self._real_speech_turn()
+        min_sec = 0.12 if allow_short_fillers else 0.2
+        min_samples = int(self.sample_rate * min_sec)
         if audio.size < min_samples:
             return ""
         use_prompt = ""
         if getattr(self.stt, "supports_prompt", False):
             use_prompt = sanitize_prompt(prompt)
-        text = self.stt.transcribe(audio, self.sample_rate, initial_prompt=use_prompt)
-        return clean_transcript(text)
+        text = self.stt.transcribe(
+            audio,
+            self.sample_rate,
+            initial_prompt=use_prompt,
+            allow_short_fillers=allow_short_fillers,
+        )
+        return clean_transcript(text, allow_short_fillers=allow_short_fillers)
 
     def _tick(self) -> None:
         buf = self._snapshot()
@@ -249,13 +266,21 @@ class StreamingTranscriber:
                     buf = buf[closed_end:]
 
         if do_final:
-            tail = self._decode(buf, committed) if buf.size else ""
-            final = clean_transcript(_join(committed, tail))
+            allow_short = self._real_speech_turn()
+            tail = (
+                self._decode(buf, committed, allow_short_fillers=allow_short)
+                if buf.size
+                else ""
+            )
+            final = clean_transcript(_join(committed, tail), allow_short_fillers=allow_short)
             if not final and self._session_peak >= 0.003:
                 full = self._full_turn_audio()
-                if full.size >= int(self.sample_rate * 0.25):
-                    retry = self._decode(full, "")
-                    final = clean_transcript(_join(committed, retry))
+                if full.size >= int(self.sample_rate * 0.12):
+                    retry = self._decode(full, "", allow_short_fillers=allow_short)
+                    final = clean_transcript(
+                        _join(committed, retry),
+                        allow_short_fillers=allow_short,
+                    )
             self._final_text = final
             self._active = False
             with self._lock:

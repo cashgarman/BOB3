@@ -51,6 +51,7 @@ def test_tool_registry_load_builtins_and_invoke(tmp_path: Path):
     reg = ToolRegistry(tmp_path, settings=None, memory=FakeMemory([{"id": "1", "text": "likes tea"}]))
     names = reg.load()
     assert "get_current_time" in names
+    assert "conversation_log" in names
     assert "notes_read" in names
     assert "set_speech_mood" in names
     assert "memory_search" in names
@@ -74,6 +75,25 @@ def test_tool_registry_load_builtins_and_invoke(tmp_path: Path):
     assert "example.com" in opened
     assert "Error" in reg.invoke("open_url", {"url": "ftp://bad"}, ctx=ctx)
     assert "Error" in reg.invoke("missing_tool", {}, ctx=ctx)
+    reg.close()
+
+
+def test_conversation_log_tool(tmp_path: Path):
+    from bob.chat_store import ChatStore
+
+    store = ChatStore(tmp_path / "chat.db")
+    sid = store.current_session()
+    store.add_message(sid, "user", "What is the weather today?")
+    store.add_message(sid, "assistant", "Sunny.")
+
+    reg = ToolRegistry(tmp_path)
+    reg.load()
+    ctx = reg.context(chat=store, session_id=sid)
+    out = reg.invoke("conversation_log", {"limit": 5}, ctx=ctx)
+    assert "What is the weather today?" in out
+    assert "User:" in out
+    assert "Bob:" in out
+    store.close()
     reg.close()
 
 

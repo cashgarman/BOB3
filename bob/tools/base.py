@@ -29,6 +29,8 @@ class ToolContext:
     cancel: threading.Event = field(default_factory=threading.Event)
     settings: Any = None
     memory: Any = None
+    chat: Any = None
+    session_id: int | None = None
     data_dir: Path = Path("data")
     status: Callable[[str], None] = _silent
     _mood: str = DEFAULT_MOOD

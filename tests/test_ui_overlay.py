@@ -16,11 +16,10 @@ def test_overlay_initial_state(ui):
 
 
 def test_overlay_set_state_and_level(ui):
-    ui.set_state(State.LISTENING, "CTRL+SHIFT+SPACE to send")
+    ui.set_state(State.LISTENING)
     ui.set_level(0.75)
     pump(ui)
     assert ui.status.cget("text") == "LISTENING"
-    assert "CTRL+SHIFT+SPACE" in ui.meta.cget("text")
     assert abs(ui.level.get() - 0.75) < 1e-6
 
 

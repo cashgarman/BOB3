@@ -226,11 +226,17 @@ class AudioHub:
             if self._queue_drained():
                 self._play_done.set()
 
-    def wait_utterance(self, epoch: int) -> None:
+    def wait_utterance(self, epoch: int, timeout: float | None = None) -> bool:
         with self._lock:
             if epoch != self._active_epoch:
-                return
-        self._play_done.wait()
+                return True
+        if timeout is None:
+            self._play_done.wait()
+            return True
+        ok = self._play_done.wait(timeout=max(0.0, float(timeout)))
+        if not ok:
+            self.cancel_playback()
+        return ok
 
     def cancel_playback(self) -> None:
         with self._lock:

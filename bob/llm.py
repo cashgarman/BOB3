@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -12,6 +13,41 @@ import httpx
 log = logging.getLogger(__name__)
 
 LARGE_MODEL_BYTES = 6 * 1024 * 1024 * 1024
+
+_PREAMBLE_RE = re.compile(
+    r"\b(let me check|i(?:['’]ll| will) (?:check|look|find)|give me a (?:moment|second))\b",
+    re.IGNORECASE,
+)
+
+
+def needs_conversation_log(user_text: str) -> bool:
+    t = (user_text or "").lower()
+    keys = (
+        "first question",
+        "first prompt",
+        "how many prompt",
+        "how many question",
+        "when was my",
+        "what time was",
+        "what time did",
+        "earlier in this",
+        "conversation today",
+        "conversation log",
+        "in our conversation",
+        "in this conversation",
+    )
+    return any(k in t for k in keys)
+
+
+def _is_tool_preamble(text: str) -> bool:
+    return bool(_PREAMBLE_RE.search(text or ""))
+
+
+def _deferral_tool_name(preamble: str, user_text: str) -> str | None:
+    p = (preamble or "").lower()
+    if "conversation" in p or needs_conversation_log(user_text):
+        return "conversation_log"
+    return None
 
 
 def _ollama_error(exc: Exception, model: str) -> str:
@@ -55,12 +91,15 @@ def _ollama_error_body(raw: str, model: str) -> str | None:
 STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
 TOOL_GUIDANCE = (
     "You can call tools. Use one only when it gives you something you cannot know on your own, "
-    "such as the current time or the user's saved notes. "
+    "such as the current time, the user's saved notes, or timestamps from this chat via "
+    "conversation_log. "
     "When the user's feelings or the news call for it, call set_speech_mood first "
     "(calm, warm, upbeat, excited, serious, sad, sorry, whisper, hurried) and then answer; "
     "never say the mood name aloud. "
     "Never read tool names, arguments, or JSON aloud: once a tool returns, just say the answer "
-    "in a short spoken sentence."
+    "in a short spoken sentence. "
+    "Do not tell the user you are checking or looking something up — call the tool silently, "
+    "then answer in one breath."
 )
 
 
@@ -205,6 +244,18 @@ class OllamaChat:
                     if partial:
                         self.history.append({"role": "assistant", "content": partial})
                     raise
+                if not calls and offered and _is_tool_preamble(content) and on_tool:
+                    hinted = _deferral_tool_name(content, spoken_user)
+                    if hinted:
+                        try:
+                            args = {"limit": 40} if hinted == "conversation_log" else {}
+                            result = on_tool(hinted, args)
+                        except Exception as exc:
+                            result = f"Error: tool '{hinted}' failed: {exc}"
+                        if content.strip():
+                            self.history.append({"role": "assistant", "content": content})
+                        self.history.append({"role": "tool", "tool_name": hinted, "content": result})
+                        continue
                 if content.strip() or calls:
                     message: dict[str, Any] = {"role": "assistant", "content": content}
                     if calls:
@@ -272,7 +323,6 @@ class OllamaChat:
             payload["tools"] = tools
         parts: list[str] = []
         calls: list[dict[str, Any]] = []
-        speaking = False
         first_token = True
         t0 = time.perf_counter()
         with httpx.Client(timeout=STREAM_TIMEOUT) as client:
@@ -299,19 +349,20 @@ class OllamaChat:
                     chunk = message.get("content") or ""
                     if chunk:
                         parts.append(chunk)
-                        # Text before a tool call is a preamble, not the answer.
-                        if speaking or not calls:
-                            speaking = True
-                            if first_token:
-                                self.last_ttft_ms = (time.perf_counter() - t0) * 1000.0
-                                first_token = False
-                            if spoken is not None:
-                                spoken.append(chunk)
-                            yield chunk
                     if data.get("done"):
                         self._record_eval(data)
                         break
-        return "".join(parts), calls
+        content = "".join(parts)
+        # Hold back tool-round narration and any deferral while tools are offered.
+        if not calls and content:
+            if tools and _is_tool_preamble(content):
+                return content, calls
+            if first_token:
+                self.last_ttft_ms = (time.perf_counter() - t0) * 1000.0
+            if spoken is not None:
+                spoken.append(content)
+            yield content
+        return content, calls
 
     def _trim(self) -> None:
         max_msgs = max(2, self.max_turns * 2)

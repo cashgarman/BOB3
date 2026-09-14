@@ -19,7 +19,6 @@ def overlay():
     theming.set_current(theming.preset("midnight"))
     try:
         win = Overlay(
-            "ctrl+shift+space",
             on_toggle=lambda: None,
             on_quit=lambda: None,
             on_submit=lambda _text: None,
@@ -49,7 +48,7 @@ def ui(overlay):
     overlay.on_hide = None
     theming.set_current(theming.preset("midnight"))
     overlay.apply_theme(theming.current())
-    overlay.set_state(State.IDLE, "Toggle listen  CTRL+SHIFT+SPACE")
+    overlay.set_state(State.IDLE)
     overlay.set_level(0)
     overlay.set_transcript([])
     overlay.composer.delete(0, "end")

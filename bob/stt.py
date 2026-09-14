@@ -117,7 +117,14 @@ class SpeechToText:
         except Exception as exc:
             raise RuntimeError(f"Failed to load Whisper: {last_error or exc}") from exc
 
-    def transcribe(self, audio: np.ndarray, sample_rate: int, initial_prompt: str = "") -> str:
+    def transcribe(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
+        initial_prompt: str = "",
+        *,
+        allow_short_fillers: bool = False,
+    ) -> str:
         if self._model is None:
             raise RuntimeError("Whisper is not loaded")
         pcm, _, _, ok = prepare_pcm(audio)
@@ -127,10 +134,12 @@ class SpeechToText:
         prompt = sanitize_prompt(initial_prompt)
         if prompt:
             kwargs["initial_prompt"] = prompt[-800:]
+        # Whisper's VAD often strips brief phrases; skip it on short clips.
+        use_vad = pcm.size >= int(sample_rate * 1.5)
         segments, _info = self._model.transcribe(
             pcm,
             language="en",
-            vad_filter=True,
+            vad_filter=use_vad,
             beam_size=1,
             without_timestamps=True,
             condition_on_previous_text=False,
@@ -142,12 +151,12 @@ class SpeechToText:
         texts = []
         for seg in segments:
             text = (seg.text or "").strip()
-            if not text or _is_hallucination(seg, text):
+            if not text or _is_hallucination(seg, text, allow_short_fillers=allow_short_fillers):
                 continue
-            cleaned = clean_transcript(text)
+            cleaned = clean_transcript(text, allow_short_fillers=allow_short_fillers)
             if cleaned:
                 texts.append(cleaned)
-        return clean_transcript(" ".join(texts))
+        return clean_transcript(" ".join(texts), allow_short_fillers=allow_short_fillers)
 
 
 def _cuda_available() -> bool:
@@ -239,7 +248,7 @@ def _has_phrase_loop(words: list[str], min_repeats: int = 4) -> bool:
     return False
 
 
-def is_bad_transcript(text: str) -> bool:
+def is_bad_transcript(text: str, *, allow_short_fillers: bool = False) -> bool:
     """Detect Whisper silence hallucinations and token-loop garbage."""
     raw = (text or "").strip()
     if not raw:
@@ -247,7 +256,7 @@ def is_bad_transcript(text: str) -> bool:
     words = _words(raw)
     if not words:
         return True
-    if len(words) <= 4 and all(w in _FILLER_WORDS for w in words):
+    if not allow_short_fillers and len(words) <= 4 and all(w in _FILLER_WORDS for w in words):
         return True
     if _has_phrase_loop(words, min_repeats=4):
         return True
@@ -278,10 +287,10 @@ def is_bad_transcript(text: str) -> bool:
     return False
 
 
-def clean_transcript(text: str) -> str:
+def clean_transcript(text: str, *, allow_short_fillers: bool = False) -> str:
     """Drop known garbage; otherwise return stripped text."""
     raw = (text or "").strip()
-    if not raw or is_bad_transcript(raw):
+    if not raw or is_bad_transcript(raw, allow_short_fillers=allow_short_fillers):
         return ""
     return raw
 
@@ -297,7 +306,7 @@ def sanitize_prompt(prompt: str) -> str:
     return raw
 
 
-def _is_hallucination(seg, text: str) -> bool:
+def _is_hallucination(seg, text: str, *, allow_short_fillers: bool = False) -> bool:
     no_speech = float(getattr(seg, "no_speech_prob", 0.0) or 0.0)
     logprob = float(getattr(seg, "avg_logprob", 0.0) or 0.0)
     compression = float(getattr(seg, "compression_ratio", 0.0) or 0.0)
@@ -305,11 +314,13 @@ def _is_hallucination(seg, text: str) -> bool:
         return True
     if no_speech > 0.85 and logprob < -0.5:
         return True
-    if is_bad_transcript(text):
+    if is_bad_transcript(text, allow_short_fillers=allow_short_fillers):
         return True
     lowered = text.lower().strip()
     bare = lowered.rstrip(".!?,;:")
     if bare in _FILLERS or lowered in _FILLERS:
+        if allow_short_fillers:
+            return False
         # Stock silence fillers only when Whisper doubts there was speech.
         return no_speech > 0.45
     return False

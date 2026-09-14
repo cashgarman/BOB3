@@ -15,6 +15,7 @@ from bob.tools.schema import spec_from_function
 
 BUILTIN_MODULES = (
     "bob.tools.builtin.clock",
+    "bob.tools.builtin.conversation",
     "bob.tools.builtin.web",
     "bob.tools.builtin.notes",
     "bob.tools.builtin.recall",
@@ -144,6 +145,8 @@ class ToolRegistry:
         status: Callable[[str], None] | None = None,
         mood: str | None = None,
         on_mood: Callable[[str], None] | None = None,
+        chat: Any = None,
+        session_id: int | None = None,
     ) -> ToolContext:
         from bob.voice_mood import resolve_mood
 
@@ -151,6 +154,8 @@ class ToolRegistry:
             cancel=cancel or threading.Event(),
             settings=self.settings,
             memory=self.memory,
+            chat=chat,
+            session_id=session_id,
             data_dir=self.data_dir,
             _mood=resolve_mood(mood),
         )

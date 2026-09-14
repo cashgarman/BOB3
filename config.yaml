@@ -6,11 +6,11 @@ tts_voice: af_heart
 tts_speed: 1.0
 tts_mood: neutral
 wake_word: hey_jarvis
-wake_word_enabled: true
+wake_word_enabled: false
 wake_threshold: 0.5
 hotkey: ctrl+shift+alt+f5
-max_silence_sec: 0.7
-auto_endpoint: true
+max_silence_sec: 0.0
+auto_endpoint: false
 endpoint_silence_ms: 700
 turn_detector: smart_turn
 turn_min_silence_ms: 200
