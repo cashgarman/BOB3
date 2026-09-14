@@ -41,8 +41,7 @@ class MemoryService:
         vector = self.embedder.encode(query)
         hits = self.vectors.search(vector, limit=limit)
         names = _guess_names(query)
-        extra_ids = set(self.graph.related_fact_ids(names + ["user"]))
-        by_id = {row["id"]: row for row in self.vectors.list_all() if row.get("enabled", True)}
+        extra_ids = set(self.graph.related_fact_ids(names)) if names else set()
         merged: list[dict[str, Any]] = []
         seen: set[str] = set()
         for row in hits:
@@ -50,13 +49,15 @@ class MemoryService:
             if mid and mid not in seen:
                 merged.append(row)
                 seen.add(mid)
-        for mid in extra_ids:
-            if mid in seen or mid not in by_id:
-                continue
-            merged.append(by_id[mid])
-            seen.add(mid)
-            if len(merged) >= limit:
-                break
+        if extra_ids:
+            by_id = {row["id"]: row for row in self.vectors.list_all() if row.get("enabled", True)}
+            for mid in extra_ids:
+                if mid in seen or mid not in by_id:
+                    continue
+                merged.append(by_id[mid])
+                seen.add(mid)
+                if len(merged) >= limit:
+                    break
         lines = [str(row.get("text") or "").strip() for row in merged[:limit]]
         lines = [ln for ln in lines if ln]
         if not lines:

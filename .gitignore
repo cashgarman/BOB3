@@ -14,4 +14,4 @@ build/
 .python-version
 .DS_Store
 Thumbs.db
-packaging/shortcut.exe
+packaging/*.exe

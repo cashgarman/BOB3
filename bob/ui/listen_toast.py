@@ -183,6 +183,7 @@ class ListenToast(ctk.CTkToplevel):
     def apply_theme(self, theme: Theme) -> None:
         theming.restyle(self, theme)  # the toplevel itself is role "skip": it is a card, not a window
         self.configure(fg_color=theme.surface)
+        self.inner.configure(fg_color=theme.surface)
         self.wave.configure(bg=theme.surface)
         self.status.configure(text_color=theme.state_color(self._state))
         self._style()

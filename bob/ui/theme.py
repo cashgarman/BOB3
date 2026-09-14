@@ -62,7 +62,7 @@ FONT_SUGGESTIONS = (
 @dataclass(frozen=True)
 class Theme:
     key: str
-    label: str
+    title: str
     appearance: str = "dark"
     font_family: str = "Segoe UI"
     bg: str = "#111318"
@@ -107,7 +107,7 @@ class Theme:
     def window(self) -> dict[str, Any]:
         return {"fg_color": self.bg}
 
-    def label(self, muted: bool = False) -> dict[str, Any]:
+    def label_style(self, muted: bool = False) -> dict[str, Any]:
         return {"text_color": self.text_muted if muted else self.text}
 
     def button(self, role: str = "accent") -> dict[str, Any]:
@@ -222,10 +222,10 @@ def normalize_hex(value: Any) -> str | None:
 PRESETS: dict[str, Theme] = {
     t.key: t
     for t in (
-        Theme(key="midnight", label="Midnight"),
+        Theme(key="midnight", title="Midnight"),
         Theme(
             key="ocean",
-            label="Ocean",
+            title="Ocean",
             bg="#0b1622",
             surface="#12202f",
             surface_alt="#1b2d40",
@@ -247,7 +247,7 @@ PRESETS: dict[str, Theme] = {
         ),
         Theme(
             key="ember",
-            label="Ember",
+            title="Ember",
             bg="#16110f",
             surface="#221916",
             surface_alt="#2f221d",
@@ -269,7 +269,7 @@ PRESETS: dict[str, Theme] = {
         ),
         Theme(
             key="forest",
-            label="Forest",
+            title="Forest",
             bg="#0f1512",
             surface="#17201b",
             surface_alt="#1f2b24",
@@ -291,7 +291,7 @@ PRESETS: dict[str, Theme] = {
         ),
         Theme(
             key="dracula",
-            label="Dracula",
+            title="Dracula",
             bg="#282a36",
             surface="#21222c",
             surface_alt="#343746",
@@ -313,7 +313,7 @@ PRESETS: dict[str, Theme] = {
         ),
         Theme(
             key="nord",
-            label="Nord",
+            title="Nord",
             bg="#2e3440",
             surface="#3b4252",
             surface_alt="#434c5e",
@@ -335,7 +335,7 @@ PRESETS: dict[str, Theme] = {
         ),
         Theme(
             key="paper",
-            label="Paper (light)",
+            title="Paper (light)",
             appearance="light",
             bg="#f7f7f5",
             surface="#ffffff",
@@ -358,7 +358,7 @@ PRESETS: dict[str, Theme] = {
         ),
         Theme(
             key="solar",
-            label="Solarized (light)",
+            title="Solarized (light)",
             appearance="light",
             bg="#fdf6e3",
             surface="#eee8d5",
@@ -381,7 +381,7 @@ PRESETS: dict[str, Theme] = {
         ),
         Theme(
             key="contrast",
-            label="High contrast",
+            title="High contrast",
             bg="#000000",
             surface="#0a0a0a",
             surface_alt="#1a1a1a",
@@ -446,7 +446,7 @@ def diff_overrides(theme: Theme, base_key: str | None) -> dict[str, str]:
     base = preset(base_key)
     out: dict[str, str] = {}
     for f in fields(Theme):
-        if f.name in {"key", "label"}:
+        if f.name in {"key", "title"}:
             continue
         if getattr(theme, f.name) != getattr(base, f.name):
             out[f.name] = getattr(theme, f.name)
@@ -566,7 +566,7 @@ def _restyle_one(w: Any, theme: Theme, role: str | None, refont: bool) -> None:
             _refont(w, theme)
     elif isinstance(w, ctk.CTkLabel):
         if role != "status":
-            _safe_configure(w, **theme.label(muted=role == "muted"))
+            _safe_configure(w, **theme.label_style(muted=role == "muted"))
         if refont:
             _refont(w, theme)
     elif isinstance(w, ctk.CTkEntry):
@@ -601,11 +601,11 @@ def _restyle_one(w: Any, theme: Theme, role: str | None, refont: bool) -> None:
 
 
 def labels_for(keys: Iterable[str]) -> list[str]:
-    return [PRESETS[k].label for k in keys if k in PRESETS]
+    return [PRESETS[k].title for k in keys if k in PRESETS]
 
 
 def key_for_label(label: str) -> str:
     for key, theme in PRESETS.items():
-        if theme.label == label:
+        if theme.title == label:
             return key
     return DEFAULT_PRESET

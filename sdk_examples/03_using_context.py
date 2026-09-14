@@ -10,6 +10,7 @@ or tamper with it. Through the context a tool can reach:
     ctx.settings   The live `Settings` object (model name, voice, hotkey...).
     ctx.memory     The `MemoryService`, or None when memory is offline.
     ctx.status()   Push a short status string to Bob's overlay while working.
+    ctx.set_mood() Colour this turn's spoken reply (see example 10).
     ctx.cancel     A threading.Event set when the user cancels the turn.
     ctx.cancelled  Shortcut for `ctx.cancel.is_set()`.
 

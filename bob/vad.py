@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-
 WINDOW = 512
+CONTEXT = 64
 
 
 def speech_regions(
@@ -34,6 +34,50 @@ def speech_regions(
         return []
 
 
+class StreamingSilero:
+    """Incremental Silero VAD: one ONNX forward per 512-sample window, state kept."""
+
+    def __init__(self) -> None:
+        self._session = None
+        self.reset()
+
+    def _ensure(self) -> None:
+        if self._session is not None:
+            return
+        from faster_whisper.vad import get_vad_model
+
+        self._session = get_vad_model().session
+
+    def reset(self) -> None:
+        self._h = np.zeros((1, 1, 128), dtype=np.float32)
+        self._c = np.zeros((1, 1, 128), dtype=np.float32)
+        self._context = np.zeros((1, CONTEXT), dtype=np.float32)
+        self._pending = np.zeros(0, dtype=np.float32)
+
+    def feed(self, audio: np.ndarray) -> list[float]:
+        pcm = np.ascontiguousarray(audio, dtype=np.float32).reshape(-1)
+        if pcm.size == 0:
+            return []
+        self._ensure()
+        if self._pending.size:
+            pcm = np.concatenate([self._pending, pcm])
+        n = (pcm.size // WINDOW) * WINDOW
+        self._pending = pcm[n:]
+        if n == 0:
+            return []
+        probs: list[float] = []
+        for start in range(0, n, WINDOW):
+            window = pcm[start : start + WINDOW]
+            inp = np.concatenate([self._context.reshape(-1), window])[None, :]
+            output, self._h, self._c = self._session.run(
+                None,
+                {"input": inp.astype(np.float32), "h": self._h, "c": self._c},
+            )
+            self._context = window[None, -CONTEXT:]
+            probs.append(float(np.asarray(output).reshape(-1)[-1]))
+        return probs
+
+
 @dataclass
 class EndpointState:
     in_speech: bool
@@ -43,7 +87,7 @@ class EndpointState:
 
 
 class Endpointer:
-    """Streaming endpointer over a rolling window of 16 kHz audio."""
+    """Streaming endpointer: Silero probability per 32 ms window, no rolling re-decode."""
 
     def __init__(
         self,
@@ -51,29 +95,31 @@ class Endpointer:
         threshold: float = 0.5,
         min_silence_ms: int = 700,
         min_speech_ms: int = 250,
-        window_sec: float = 3.0,
+        window_sec: float = 8.0,
     ) -> None:
         self.sample_rate = int(sample_rate)
         self.threshold = float(threshold)
         self.min_silence_ms = int(min_silence_ms)
         self.min_speech_ms = int(min_speech_ms)
         self._window = int(self.sample_rate * window_sec)
-        self._eval_hop = int(self.sample_rate * 0.08)
+        self._vad = StreamingSilero()
         self.reset()
 
     def reset(self) -> None:
+        self._vad.reset()
         self._chunks: list[np.ndarray] = []
         self._samples = 0
         self._heard = False
         self._in_speech = False
         self._speech_samples = 0
         self._silence_samples = 0
-        self._last_eval = 0
         self._speech_start = 0
+        self._neg = max(self.threshold - 0.15, 0.01)
 
     def configure(self, threshold: float | None = None, min_silence_ms: int | None = None) -> None:
         if threshold is not None:
             self.threshold = float(threshold)
+            self._neg = max(self.threshold - 0.15, 0.01)
         if min_silence_ms is not None:
             self.min_silence_ms = int(min_silence_ms)
 
@@ -84,45 +130,33 @@ class Endpointer:
         self._chunks.append(pcm)
         self._samples += pcm.size
         self._trim()
-        if self._samples - self._last_eval < self._eval_hop:
+        probs = self._vad.feed(pcm)
+        if not probs:
             if self._in_speech:
                 self._speech_samples += pcm.size
                 self._silence_samples = 0
             elif self._heard:
                 self._silence_samples += pcm.size
             return self.state
-        self._last_eval = self._samples
-        audio = self._concat()
-        regions = speech_regions(
-            audio,
-            sample_rate=self.sample_rate,
-            threshold=self.threshold,
-            min_silence_ms=min(200, self.min_silence_ms),
-            min_speech_ms=self.min_speech_ms,
-        )
-        near = int(0.2 * self.sample_rate)
-        if regions:
-            last = regions[-1]
-            trailing = audio.size - int(last["end"])
-            self._in_speech = trailing < near
+        for prob in probs:
             if self._in_speech:
-                self._heard = True
-                self._speech_samples = int(last["end"]) - int(last["start"])
-                self._silence_samples = 0
-                offset = self._samples - audio.size
-                self._speech_start = offset + int(last["start"])
-            else:
-                self._silence_samples = max(0, trailing)
-                self._speech_samples = 0
-                if int(last["end"]) > 0:
+                if prob < self._neg:
+                    self._in_speech = False
+                    self._silence_samples = WINDOW
+                    self._speech_samples = 0
+                else:
+                    self._speech_samples += WINDOW
+                    self._silence_samples = 0
                     self._heard = True
-        else:
-            self._in_speech = False
-            self._speech_samples = 0
-            if self._heard:
-                self._silence_samples = min(self._silence_samples + pcm.size, audio.size)
             else:
-                self._silence_samples = audio.size
+                if prob >= self.threshold:
+                    self._in_speech = True
+                    self._heard = True
+                    self._speech_samples = WINDOW
+                    self._silence_samples = 0
+                    self._speech_start = max(0, self._samples - WINDOW)
+                elif self._heard:
+                    self._silence_samples += WINDOW
         return self.state
 
     @property
@@ -134,6 +168,15 @@ class Endpointer:
             speech_ms=1000.0 * self._speech_samples / sr,
             silence_ms=1000.0 * self._silence_samples / sr,
         )
+
+    def recent_audio(self, seconds: float = 8.0) -> np.ndarray:
+        audio = self._concat()
+        if audio.size == 0:
+            return np.zeros(0, dtype=np.float32)
+        keep = int(max(0.0, seconds) * self.sample_rate)
+        if keep and audio.size > keep:
+            return audio[-keep:]
+        return audio
 
     def take_speech_seed(self) -> np.ndarray:
         """Audio from the current/last speech onset, padded slightly at the front."""
@@ -170,4 +213,3 @@ class Endpointer:
                 break
         self._samples -= dropped
         self._speech_start = max(0, self._speech_start - dropped)
-        self._last_eval = max(0, self._last_eval - dropped)

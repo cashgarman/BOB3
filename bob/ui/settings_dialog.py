@@ -7,7 +7,8 @@ import customtkinter as ctk
 from bob.hotkeys import HotkeyRecorder
 from bob.settings import Settings
 from bob.ui import theme as theming
-from bob.ui.theme import PRESET_KEYS, Theme, set_role
+from bob.ui.theme import PRESET_KEYS, Theme, key_for_label, labels_for, preset, set_role
+from bob.voice_mood import MOOD_NAMES as MOODS
 
 STT_MODELS = ("large-v3-turbo", "distil-large-v3", "medium", "small")
 COMPUTE = ("int8_float16", "int8", "float16")
@@ -41,6 +42,9 @@ class SettingsDialog(ctk.CTkToplevel):
         super().__init__(master)
         theme = theming.current()
         self.title("Bob settings")
+        from bob.win32_app import apply_tk_icon
+
+        apply_tk_icon(self)
         self.geometry("560x640")
         self.attributes("-topmost", True)
         self.configure(**theme.window())
@@ -57,7 +61,7 @@ class SettingsDialog(ctk.CTkToplevel):
         frame.pack(fill="both", expand=True, padx=14, pady=12)
 
         self._section(frame, "Appearance")
-        self._combo(frame, "Theme preset", "theme", list(PRESET_KEYS))
+        self._theme_combo(frame)
         self._hint(frame, "Colours and font can be tuned per preset in the theme editor.")
         if on_open_theme:
             set_role(
@@ -72,6 +76,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._entry(frame, "Context tokens", "llm_num_ctx")
         self._combo(frame, "TTS voice", "tts_voice", list(VOICES))
         self._entry(frame, "TTS speed (0.5–2.0)", "tts_speed")
+        self._combo(frame, "Default speech mood", "tts_mood", list(MOODS))
         self._combo(frame, "Wake word", "wake_word", list(WAKE_WORDS))
         self._check(frame, "Wake word enabled", "wake_word_enabled")
         self._entry(frame, "Wake threshold", "wake_threshold")
@@ -101,7 +106,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._entry(frame, "Tool timeout seconds", "tool_timeout_sec")
         self._entry(frame, "Max tool rounds per turn", "max_tool_rounds")
 
-        ctk.CTkLabel(frame, text="System prompt", anchor="w", **theme.label()).pack(fill="x", pady=(10, 2))
+        ctk.CTkLabel(frame, text="System prompt", anchor="w", **theme.label_style()).pack(fill="x", pady=(10, 2))
         self.prompt = ctk.CTkTextbox(frame, height=120, **theme.textbox())
         self.prompt.pack(fill="x")
         self.prompt.insert("1.0", settings.system_prompt)
@@ -121,16 +126,29 @@ class SettingsDialog(ctk.CTkToplevel):
         if self.on_open_theme:
             self.on_open_theme()
 
+    def _theme_combo(self, parent) -> None:
+        theme = theming.current()
+        ctk.CTkLabel(parent, text="Theme preset", anchor="w", **theme.label_style()).pack(fill="x", pady=(8, 2))
+        var = ctk.StringVar(value=preset(self.settings.theme).title)
+        self.vars["theme"] = var
+        ctk.CTkComboBox(
+            parent,
+            values=labels_for(PRESET_KEYS),
+            variable=var,
+            state="readonly",
+            **theme.combo(),
+        ).pack(fill="x")
+
     def _section(self, parent, title: str) -> None:
         theme = theming.current()
         set_role(
-            ctk.CTkLabel(parent, text=title.upper(), anchor="w", font=theme.font(11, "bold"), **theme.label(muted=True)),
+            ctk.CTkLabel(parent, text=title.upper(), anchor="w", font=theme.font(11, "bold"), **theme.label_style(muted=True)),
             "muted",
         ).pack(fill="x", pady=(14, 0))
 
     def _hotkey_picker(self, parent) -> None:
         theme = theming.current()
-        ctk.CTkLabel(parent, text="Hotkey", anchor="w", **theme.label()).pack(fill="x", pady=(8, 2))
+        ctk.CTkLabel(parent, text="Hotkey", anchor="w", **theme.label_style()).pack(fill="x", pady=(8, 2))
         var = ctk.StringVar(value=str(self.settings.hotkey))
         self.vars["hotkey"] = var
         self._hotkey_btn = ctk.CTkButton(
@@ -146,7 +164,7 @@ class SettingsDialog(ctk.CTkToplevel):
                 text="Click, then press any key combination. The next key is stored.",
                 anchor="w",
                 font=theme.font(12),
-                **theme.label(muted=True),
+                **theme.label_style(muted=True),
             ),
             "muted",
         )
@@ -184,14 +202,14 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _entry(self, parent, label: str, key: str) -> None:
         theme = theming.current()
-        ctk.CTkLabel(parent, text=label, anchor="w", **theme.label()).pack(fill="x", pady=(8, 2))
+        ctk.CTkLabel(parent, text=label, anchor="w", **theme.label_style()).pack(fill="x", pady=(8, 2))
         var = ctk.StringVar(value=str(getattr(self.settings, key)))
         self.vars[key] = var
         ctk.CTkEntry(parent, textvariable=var, **theme.entry()).pack(fill="x")
 
     def _combo(self, parent, label: str, key: str, values: list[str]) -> None:
         theme = theming.current()
-        ctk.CTkLabel(parent, text=label, anchor="w", **theme.label()).pack(fill="x", pady=(8, 2))
+        ctk.CTkLabel(parent, text=label, anchor="w", **theme.label_style()).pack(fill="x", pady=(8, 2))
         current = str(getattr(self.settings, key) or "")
         if current and current not in values:
             values = [current, *values]
@@ -208,7 +226,7 @@ class SettingsDialog(ctk.CTkToplevel):
                 anchor="w",
                 font=theme.font(12),
                 wraplength=500,
-                **theme.label(muted=True),
+                **theme.label_style(muted=True),
             ),
             "muted",
         ).pack(fill="x", pady=(0, 4))
@@ -247,6 +265,9 @@ class SettingsDialog(ctk.CTkToplevel):
                     typed[key] = value
             except (TypeError, ValueError):
                 problems.append(f"{key.replace('_', ' ')}: '{value}' is not a number")
+        if "theme" in typed:
+            choice = str(typed["theme"] or "").strip()
+            typed["theme"] = choice if choice in PRESET_KEYS else key_for_label(choice)
         problems.extend(_validate(typed))
         if problems:
             self.error.configure(text="\n".join(problems[:4]))

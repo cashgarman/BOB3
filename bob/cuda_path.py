@@ -57,3 +57,18 @@ def _preload_cuda_dlls(bins: list[Path]) -> None:
             _PRELOADED.append(name)
         except OSError:
             continue
+
+
+def preload_onnxruntime() -> None:
+    """Load CUDA/cuDNN into onnxruntime-gpu after the pip NVIDIA wheels are on PATH."""
+    add_cuda_dll_dirs()
+    try:
+        import onnxruntime as ort
+    except Exception:
+        return
+    preload = getattr(ort, "preload_dlls", None)
+    if callable(preload):
+        try:
+            preload()
+        except Exception:
+            pass

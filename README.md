@@ -19,6 +19,22 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
 
 This creates a project-local `.venv` and installs dependencies.
 
+## Install as a Windows app
+
+After setup, register Bob so it appears in the Start Menu, Apps list, and **Settings → Personalization → Taskbar → Other system tray icons** (like other tray apps):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Or double-click `install.bat`. This creates a branded `Bob.exe`, a Start Menu shortcut, and an Apps & Features uninstall entry. Launch Bob once after installing so Windows adds it to the tray-icon list.
+
+```powershell
+.\uninstall.ps1
+```
+
+removes the Windows app registration. It does not delete this folder, `.venv`, or downloaded models.
+
 ## Run
 
 ```powershell
@@ -45,6 +61,7 @@ Bob lives in the **system tray**. Right-click the icon for every setting. Left-c
 | Interrupt Bob | Hotkey, or speak over him when **Voice barge-in** is on (headphones) |
 | Start listening | Wake word `hey_jarvis` |
 | Overlay | Optional; **Show overlay** on the tray menu |
+| Theme | Tray → Appearance (presets) or **Customize…** for colours and font |
 | Memories | Tray → Memories… (edit / disable / delete / forget all) |
 | Start with Windows | Tray → Startup |
 
@@ -54,7 +71,9 @@ All fields are also in **All settings…** and [`config.yaml`](config.yaml).
 
 Bob can call tools mid-turn: it runs them, then speaks the result. Tools run automatically with no confirmation, so the same hotkey that cancels a reply also cancels a tool. Each call is capped by `tool_timeout_sec`, and one turn may use up to `max_tool_rounds` rounds of tool calls before Bob has to answer in words.
 
-Built in: `get_current_time`, `open_url`, `notes_read`, `notes_write` (`data\notes.md`), `memory_search`.
+Built in: `get_current_time`, `open_url`, `notes_read`, `notes_write` (`data\notes.md`), `memory_search`, `set_speech_mood`, `list_speech_moods`.
+
+Speech moods change how Kokoro delivers the rest of the turn (rate, pitch, loudness, pauses) without swapping the selected voice. The model can call `set_speech_mood`, a tool can call `ctx.set_mood("excited")`, or a reply can start with `[mood:excited]`. Default mood is `tts_mood` in settings (also on the tray Voice menu). See [`sdk_examples/10_speech_mood.md`](sdk_examples/10_speech_mood.md).
 
 The voice model has to support tool calling. The default `qwen2.5:latest` does; so do `qwen3`, `llama3.1`, and `mistral-nemo`. Turn tools off in settings if you switch to a model that does not.
 
@@ -76,7 +95,7 @@ def roll_dice(sides: int = 6) -> str:
     return f"Rolled a {random.randint(1, sides)}."
 ```
 
-Add a `ctx: ToolContext` parameter (keyword-only, or last) to reach `ctx.settings`, `ctx.memory`, `ctx.data_dir`, `ctx.cancel`, and `ctx.status(...)`. It is injected by Bob and never shown to the model. Raise `ToolError` for bad input; return a short string, since whatever you return is read aloud. See [`data\tools\_example.py`](data/tools/_example.py) for a working template.
+Add a `ctx: ToolContext` parameter (keyword-only, or last) to reach `ctx.settings`, `ctx.memory`, `ctx.data_dir`, `ctx.cancel`, `ctx.status(...)`, and `ctx.set_mood(...)`. It is injected by Bob and never shown to the model. Raise `ToolError` for bad input; return a short string, since whatever you return is read aloud. See [`data\tools\_example.py`](data/tools/_example.py) for a working template, and [`sdk_examples/`](sdk_examples/README.md) for commented walkthroughs of arguments, context, errors, HTTP, state, MCP, tests, and speech mood.
 
 ### MCP servers
 

@@ -48,7 +48,7 @@ class TalkHud(ctk.CTkToplevel):
                 self,
                 text=f"Speaking  ·  {hotkey.upper()} to send",
                 font=theme.font(12),
-                **theme.label(muted=True),
+                **theme.label_style(muted=True),
             ),
             "muted",
         )

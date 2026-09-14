@@ -14,19 +14,25 @@ from bob.settings import DATA_DIR, MODELS_DIR, Settings, load_settings
 from bob.state import State
 from bob.startup import is_enabled as startup_is_enabled
 from bob.startup import set_enabled as startup_set_enabled
-from bob.stt import SpeechToText
+from bob.stt import create_speech_to_text
 from bob.stt_stream import StreamingTranscriber
 from bob.tools import ToolRegistry
 from bob.tts import TextToSpeech
 from bob.tts_stream import SpeechStreamer
+from bob.turn import SmartTurn, TurnGate
 from bob.ui.memories import MemoriesWindow
 from bob.ui.hud import TalkHud
 from bob.ui.listen_toast import ListenToast
 from bob.ui.overlay import Overlay
 from bob.ui.settings_dialog import SettingsDialog
+from bob.ui import theme as theming
+from bob.ui.theme import Theme
+from bob.ui.theme_dialog import ThemeDialog
 from bob.ui.tray import Tray
 from bob.util import gpu_memory_line, split_speakable
 from bob.vad import Endpointer
+from bob.latency import TurnTimer
+from bob.voice_mood import DEFAULT_MOOD, strip_mood_tags, take_mood_tag, visible_reply
 from bob.wakeword import WakeWordDetector
 
 log = logging.getLogger(__name__)
@@ -38,6 +44,25 @@ MAX_SHOWN_MESSAGES = 60
 # Ignore hotkey/tray/toast toggles that land closer together than this.
 TOGGLE_DEBOUNCE_SEC = 0.25
 MODELS_CACHE_SEC = 20.0
+
+_LOAD_TOAST = {
+    "Ollama": "Checking Ollama…",
+    "Speech recognition": "Loading speech recognition…",
+    "Kokoro TTS": "Loading Kokoro TTS…",
+    "Turn detection": "Loading turn detector…",
+    "Wake word": "Loading wake-word model…",
+    "Memory": "Loading memory…",
+    "Tools": "Loading tools…",
+    "MCP servers": "Connecting MCP servers…",
+    "Microphone": "Starting microphone…",
+}
+
+
+def _load_toast_text(msg: str) -> str:
+    text = (msg or "").strip()
+    if not text:
+        return ""
+    return _LOAD_TOAST.get(text, text)
 
 
 class Assistant:
@@ -64,6 +89,7 @@ class Assistant:
         self.hotkey: GlobalHotkey | None = None
         self._memories_win = None
         self._settings_win = None
+        self._theme_win = None
         self.memory = MemoryService(DATA_DIR / "memory")
         self.tools = ToolRegistry(DATA_DIR, settings=self.settings, memory=self.memory)
         self.chat = ChatStore(DATA_DIR / "chat.db")
@@ -75,11 +101,12 @@ class Assistant:
             sample_rate=self.settings.sample_rate,
             input_device=self.settings.input_device or None,
             output_device=self.settings.output_device or None,
+            wasapi_exclusive=self.settings.wasapi_exclusive,
         )
-        self.stt = SpeechToText(
+        self.stt = create_speech_to_text(
             self.settings.stt_model,
             self.settings.stt_compute_type,
-            MODELS_DIR / "whisper",
+            MODELS_DIR,
         )
         self.tts = TextToSpeech(MODELS_DIR / "kokoro", self.settings.tts_voice, self.settings.tts_speed)
         self.stt_stream = StreamingTranscriber(
@@ -91,6 +118,7 @@ class Assistant:
             on_partial=self._on_partial,
         )
         self.speech = SpeechStreamer(self.tts, self.audio)
+        self.speech.set_mood(self.settings.tts_mood)
         self._listen_endpointer = Endpointer(
             sample_rate=self.settings.sample_rate,
             threshold=self.settings.vad_threshold,
@@ -120,7 +148,13 @@ class Assistant:
         self.wake.enabled = self.settings.wake_word_enabled
 
     def run(self) -> None:
-        self.overlay = Overlay(self.settings.hotkey, self.toggle_listen, self.quit)
+        theming.set_current(theming.resolve_theme(self.settings))
+        self.overlay = Overlay(
+            self.settings.hotkey,
+            self.toggle_listen,
+            self.quit,
+            on_submit=self.submit_text,
+        )
         self.overlay.on_hide = lambda: self.set_overlay_visible(False, persist=True)
         self.hud = TalkHud(self.overlay, self.settings.hotkey)
         self.toast = ListenToast(self.overlay, on_click=self.toggle_listen)
@@ -138,6 +172,7 @@ class Assistant:
     def _boot_worker(self) -> None:
         def status(msg: str) -> None:
             self._ui(lambda: self.overlay.set_state(State.LOADING, msg))
+            self._toast_load(msg)
 
         try:
             MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -151,6 +186,10 @@ class Assistant:
                 # (re)loaded from the tray or on the first turn.
                 ollama_ok = False
                 log.warning("Ollama unreachable at %s: %s", self.llm.host, exc)
+                self._toast_load(
+                    f"Ollama is not reachable at {self.llm.host}. Start it, then reconnect from the tray.",
+                    title="Bob",
+                )
                 self._ui(
                     lambda: self.overlay.set_reply(
                         f"Ollama is not reachable at {self.llm.host}. Start it, then use "
@@ -188,17 +227,32 @@ class Assistant:
                     self.llm.preload()
                 except Exception as exc:
                     log.warning("Model preload failed: %s", exc)
+                    self._toast_load(f"Model load failed: {exc}", title="Bob")
                     self._ui(lambda: self.overlay.set_reply(f"Model load failed: {exc}"))
             detail = self._ready_detail()
             self._set_state(State.IDLE, detail)
             self._ui(lambda: self.overlay.set_meta(detail))
             if self.tray:
                 self._ui(self.tray.refresh)
+            self._toast_load(f"Ready — {detail}", title="Bob")
             log.info("Ready: %s", detail)
         except Exception as exc:
             log.exception("Boot failed")
+            self._toast_load(str(exc), title="Bob failed to start")
             self._set_state(State.ERROR, str(exc)[:80])
             self._ui(lambda: self.overlay.set_reply(str(exc)))
+
+    def _toast_load(self, msg: str, title: str = "Bob is loading") -> None:
+        text = _load_toast_text(msg)
+        if not text:
+            return
+        last = getattr(self, "_last_load_toast", None)
+        if last == (title, text):
+            return
+        self._last_load_toast = (title, text)
+        from bob.os_toast import show as os_toast
+
+        os_toast(text, title, replace=True)
 
     def _ready_detail(self) -> str:
         bits = [
@@ -271,7 +325,10 @@ class Assistant:
             if self.tray:
                 self.tray.refresh()
             return
-        self.settings.update(**{field: value})
+        if field == "theme":
+            self.settings.update(theme=value, theme_overrides={})
+        else:
+            self.settings.update(**{field: value})
         self._apply_live(field, value)
         if self.tray:
             self.tray.refresh()
@@ -290,7 +347,12 @@ class Assistant:
             if k in values
         )
         model_changed = str(values.get("llm_model", self.settings.llm_model)) != self.settings.llm_model
+        old_theme = self.settings.theme
         self.settings.update(**values)
+        if "theme" in values and str(values["theme"]) != str(old_theme) and "theme_overrides" not in values:
+            self.settings.update(theme_overrides={})
+        if "theme" in values or "theme_overrides" in values:
+            self.apply_theme(theming.resolve_theme(self.settings))
         self.llm.host = self.settings.ollama_host.rstrip("/")
         self.llm.model = self.settings.llm_model
         self.llm.num_ctx = self.settings.llm_num_ctx
@@ -300,6 +362,7 @@ class Assistant:
         from bob.tts import clamp_speed
 
         self.tts.speed = clamp_speed(self.settings.tts_speed)
+        self.speech.set_mood(self.settings.tts_mood)
         self.wake.enabled = self.settings.wake_word_enabled
         self.wake.threshold = self.settings.wake_threshold
         if self.settings.wake_word != self.wake.model_name:
@@ -342,6 +405,8 @@ class Assistant:
             from bob.tts import clamp_speed
 
             self.tts.speed = clamp_speed(value)
+        elif field == "tts_mood":
+            self.speech.set_mood(value)
         elif field == "wake_word_enabled":
             self.wake.enabled = bool(value)
         elif field == "wake_threshold":
@@ -358,6 +423,9 @@ class Assistant:
             self.set_start_with_windows(bool(value))
         elif field == "tools_enabled":
             self._reload_tools()
+        elif field in {"theme", "theme_overrides"}:
+            self.apply_theme(theming.resolve_theme(self.settings))
+            self._sync_settings_theme_var()
         elif field in {
             "auto_endpoint",
             "endpoint_silence_ms",
@@ -421,9 +489,95 @@ class Assistant:
                 list_devices("input"),
                 list_devices("output"),
                 on_recording=self._set_hotkey_recording,
+                on_open_theme=self.open_theme,
             )
 
         self._ui(show)
+
+    def open_theme(self) -> None:
+        def show():
+            if self._theme_win is not None:
+                try:
+                    if self._theme_win.winfo_exists():
+                        self._theme_win.focus()
+                        self._theme_win.lift()
+                        return
+                except Exception:
+                    self._theme_win = None
+            if self.overlay is None:
+                return
+            self._theme_win = ThemeDialog(
+                self.overlay,
+                self.settings,
+                on_preview=self.apply_theme,
+                on_save=self.save_theme,
+                on_close=self._theme_closed,
+            )
+
+        self._ui(show)
+
+    def _theme_closed(self) -> None:
+        self._theme_win = None
+
+    def save_theme(self, values: dict) -> None:
+        theme_key = values.get("theme", self.settings.theme)
+        overrides = theming.clean_overrides(values.get("theme_overrides"))
+        self.settings.update(theme=theme_key, theme_overrides=overrides)
+        self.apply_theme(theming.resolve_theme(self.settings))
+        self._sync_settings_theme_var()
+        if self.tray:
+            self.tray.refresh()
+
+    def apply_theme(self, theme: Theme) -> None:
+        """Make *theme* current and restyle every open window. Does not persist."""
+
+        def apply() -> None:
+            theming.set_current(theme)
+            for win in (
+                self.overlay,
+                self.hud,
+                self.toast,
+                self._settings_win,
+                self._memories_win,
+            ):
+                if win is None:
+                    continue
+                try:
+                    if not win.winfo_exists():
+                        continue
+                except Exception:
+                    continue
+                restyle = getattr(win, "apply_theme", None)
+                if restyle:
+                    try:
+                        restyle(theme)
+                    except Exception:
+                        log.debug("Theme restyle failed", exc_info=True)
+
+        if self.overlay is None:
+            theming.set_current(theme)
+            return
+        try:
+            if threading.current_thread() is threading.main_thread():
+                apply()
+            else:
+                self._ui(apply)
+        except Exception:
+            self._ui(apply)
+
+    def _sync_settings_theme_var(self) -> None:
+        win = self._settings_win
+        if win is None:
+            return
+        var = getattr(win, "vars", {}).get("theme")
+        if var is None:
+            return
+        try:
+            from bob.ui.theme import preset
+
+            var.set(preset(self.settings.theme).title)
+        except Exception:
+            pass
 
     def open_memories(self) -> None:
         def show():
@@ -532,14 +686,17 @@ class Assistant:
 
     def _preload_safe(self) -> None:
         try:
+            self._toast_load(f"Loading {self.llm.model}…")
             self._ui(lambda: self.overlay.set_meta(f"Loading {self.llm.model} …"))
             self.llm.preload()
             self._models_cache = (0.0, [])
             self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
             if self.tray:
                 self._ui(self.tray.refresh)
+            self._toast_load(f"{self.llm.model} is ready", title="Bob")
         except Exception as exc:
             log.warning("Model preload failed: %s", exc)
+            self._toast_load(f"Model load failed: {exc}", title="Bob")
             self._ui(lambda: self.overlay.set_reply(f"Model load failed: {exc}"))
             self._ui(lambda: self.overlay.set_meta(self._ready_detail()))
 
@@ -554,6 +711,32 @@ class Assistant:
             if turn.get("role") in {"user", "assistant"}
         ]
 
+    def load_session(self, session_id: int) -> None:
+        """Switch the live transcript and LLM history to a saved chat."""
+
+        def apply() -> None:
+            if self.state in {State.LISTENING, State.THINKING, State.SPEAKING}:
+                self._cancel_current_turn()
+                self.stt_stream.cancel()
+                self.audio.stop_listening()
+                self._barge_armed = False
+                self.audio.set_capture_muted(False)
+                self._set_state(State.IDLE, self._ready_detail())
+                self._restore_idle_ui()
+            self._session_id = int(session_id)
+            self._turns = [
+                {"role": m.role, "content": m.content} for m in self.chat.list_messages(self._session_id)
+            ]
+            self._pending_user = ""
+            self._pending_reply = ""
+            self.llm.reset()
+            self._restore_llm_history()
+            self._refresh_talk()
+            if self.tray:
+                self.tray.refresh()
+
+        self._ui(apply)
+
     def _new_chat(self) -> None:
         self.llm.reset()
         self._session_id = self.chat.new_session()
@@ -561,6 +744,8 @@ class Assistant:
         self._pending_user = ""
         self._pending_reply = "New conversation."
         self._refresh_talk()
+        if self.tray:
+            self.tray.refresh()
 
     def _enqueue_chunk(self, chunk) -> None:
         if self._stop.is_set():
@@ -571,6 +756,10 @@ class Assistant:
             try:
                 self._chunk_q.get_nowait()
             except queue.Empty:
+                pass
+            try:
+                self._chunk_q.put_nowait(chunk)
+            except queue.Full:
                 pass
 
     def _chunk_loop(self) -> None:
@@ -618,8 +807,14 @@ class Assistant:
             return
         self._last_toggle = now
         state = self.state
-        if state in {State.LOADING, State.ERROR}:
+        if state == State.LOADING:
             return
+        if state == State.ERROR:
+            if getattr(self.stt, "_model", None) is None:
+                return
+            self._set_state(State.IDLE, self._ready_detail())
+            self._restore_idle_ui()
+            state = self.state
         if state in {State.SPEAKING, State.THINKING}:
             self._begin_listen()
             return
@@ -661,7 +856,7 @@ class Assistant:
         self._refresh_talk()
 
     def _refresh_talk(self) -> None:
-        messages = list(self._turns)
+        messages = list(self._turns[-MAX_SHOWN_MESSAGES:])
         pending_user = self._pending_user
         pending_reply = self._pending_reply
 
@@ -689,7 +884,7 @@ class Assistant:
         try:
             self.chat.add_message(self._session_id, role, text)
         except Exception:
-            pass
+            log.exception("Failed to persist chat message")
         if role == "user":
             self._pending_user = ""
         else:
@@ -701,8 +896,7 @@ class Assistant:
             self.overlay.set_phase("idle")
 
     def _begin_listen(self, seed=None) -> None:
-        self._cancel.set()
-        self.speech.cancel()
+        self._cancel_current_turn()
         self.stt_stream.cancel()
         self.audio.set_capture_muted(False)
         self._listen_endpointer.reset()
@@ -718,7 +912,6 @@ class Assistant:
         self._talk_set_reply("")
         hint = "pause to send" if self.settings.auto_endpoint else f"{self.settings.hotkey.upper()} to send"
         self._set_state(State.LISTENING, hint)
-        self._cancel.clear()
 
     def _barge_in(self, seed) -> None:
         if self.state not in {State.SPEAKING, State.THINKING}:
@@ -733,16 +926,52 @@ class Assistant:
         self._present_talk("reply")
         self._talk_set_reply("…")
         self._set_state(State.THINKING, "transcribing")
+        self._start_pipeline(self._cancel)
+
+    def submit_text(self, text: str) -> None:
+        """Send a typed message through the same LLM → TTS path as speech."""
+        text = (text or "").strip()
+        if not text:
+            return
+
+        def apply() -> None:
+            if self.state == State.LOADING:
+                return
+            if self.state == State.ERROR:
+                if getattr(self.stt, "_model", None) is None:
+                    return
+                self._set_state(State.IDLE, self._ready_detail())
+            if self.state == State.LISTENING:
+                self._endpoint_armed = False
+                self.audio.stop_listening()
+                self.stt_stream.cancel()
+            self._cancel_current_turn()
+            self._barge_armed = False
+            self.audio.set_capture_muted(False)
+            self._present_talk("reply")
+            self._talk_set_user(text)
+            self._talk_set_reply("…")
+            self._set_state(State.THINKING, "ollama")
+            self._start_pipeline(self._cancel, typed_text=text)
+
+        self._ui(apply)
+
+    def _start_pipeline(self, cancel: threading.Event, typed_text: str | None = None) -> None:
         self._pipeline_thread = threading.Thread(
             target=self._pipeline,
+            args=(cancel, typed_text),
             name="pipeline",
             daemon=True,
         )
         self._pipeline_thread.start()
 
     def _on_partial(self, text: str) -> None:
-        if self.state == State.LISTENING and text:
+        if self.state != State.LISTENING:
+            return
+        if text:
             self._talk_set_user(text + " …")
+        else:
+            self._talk_set_user("")
 
     def _start_speech(self) -> int:
         epoch = self.speech.begin()
@@ -752,19 +981,35 @@ class Assistant:
             self.audio.set_capture_muted(False)
             self._barge_endpointer.reset()
             self._barge_armed = True
-        self._set_state(State.SPEAKING)
+        self._set_state(State.SPEAKING, "" if self.speech.mood == DEFAULT_MOOD else self.speech.mood)
         return epoch
 
-    def _pipeline(self) -> None:
+    def _reset_turn_mood(self) -> None:
+        self.speech.set_mood(getattr(self.settings, "tts_mood", DEFAULT_MOOD))
+
+    def _apply_turn_mood(self, mood: str) -> str:
+        chosen = self.speech.set_mood(mood)
+        if self.state == State.SPEAKING:
+            self._set_state(State.SPEAKING, "" if chosen == DEFAULT_MOOD else chosen)
+        elif self.state == State.THINKING:
+            self._set_state(State.THINKING, f"mood: {chosen}")
+        return chosen
+
+    def _pipeline(self, cancel: threading.Event | None = None, typed_text: str | None = None) -> None:
         assistant_text = ""
         user_text = ""
         epoch = 0
         started = False
+        token = cancel or self._cancel
+        self._reset_turn_mood()
         try:
-            user_text = self.stt_stream.finalize()
-            if self._cancel.is_set():
+            if typed_text:
+                user_text = typed_text.strip()
+            else:
+                user_text = self.stt_stream.finalize()
+            if token.is_set():
                 return
-            too_short = self.stt_stream.total_samples < self.settings.sample_rate * 0.25
+            too_short = (not typed_text) and self.stt_stream.total_samples < self.settings.sample_rate * 0.25
             if too_short and not user_text.strip():
                 self._talk_set_user("(too short)")
                 self._set_state(State.IDLE, self._ready_detail())
@@ -788,39 +1033,47 @@ class Assistant:
                 user_text,
                 memory_block=memory_block,
                 tools=self._tool_schemas(),
-                on_tool=self._run_tool,
-                cancel=self._cancel,
+                on_tool=lambda name, arguments, t=token: self._run_tool(name, arguments, cancel=t),
+                cancel=token,
                 max_rounds=int(self.settings.max_tool_rounds),
             ):
-                if self._cancel.is_set():
+                if token.is_set():
                     if started:
                         self.speech.cancel()
                     return
                 full += chunk
                 pending += chunk
-                self._talk_set_reply(full)
+                tagged, pending, waiting = take_mood_tag(pending)
+                if tagged:
+                    self._apply_turn_mood(tagged)
+                self._talk_set_reply(visible_reply(full))
+                if waiting:
+                    continue
                 pieces, pending = split_speakable(pending, first=not started)
                 for piece in pieces:
-                    if self._cancel.is_set():
+                    if token.is_set():
                         self.speech.cancel()
                         return
+                    spoken = strip_mood_tags(piece)
+                    if not spoken:
+                        continue
                     if not started:
                         epoch = self._start_speech()
                         started = True
-                    self.speech.feed(piece)
-            leftover = pending.strip()
-            if leftover and not self._cancel.is_set():
+                    self.speech.feed(spoken)
+            leftover = strip_mood_tags(pending)
+            if leftover and not token.is_set():
                 if not started:
                     epoch = self._start_speech()
                     started = True
                 self.speech.feed(leftover)
-            if self._cancel.is_set():
+            if token.is_set():
                 if started:
                     self.speech.cancel()
                 return
             if started:
                 self.speech.finish()
-            assistant_text = full.strip()
+            assistant_text = strip_mood_tags(full)
             if assistant_text:
                 self._commit_turn("assistant", assistant_text)
             if started:
@@ -832,7 +1085,8 @@ class Assistant:
         finally:
             self._barge_armed = False
             self.audio.set_capture_muted(False)
-            if not self._cancel.is_set() and self.state != State.LISTENING:
+            self._reset_turn_mood()
+            if not token.is_set() and self.state != State.LISTENING:
                 self._set_state(State.IDLE, self._ready_detail())
                 self._ui(self._restore_idle_ui)
             if assistant_text and user_text and self.settings.memory_autosave:
@@ -848,11 +1102,14 @@ class Assistant:
             return None
         return self.tools.schemas() or None
 
-    def _run_tool(self, name: str, arguments) -> str:
+    def _run_tool(self, name: str, arguments, cancel: threading.Event | None = None) -> str:
+        token = cancel or self._cancel
         self._set_state(State.THINKING, f"tool: {name}")
         ctx = self.tools.context(
-            cancel=self._cancel,
+            cancel=token,
             status=lambda msg: self._set_state(State.THINKING, msg),
+            mood=self.speech.mood,
+            on_mood=self._apply_turn_mood,
         )
         result = self.tools.invoke(name, arguments, ctx=ctx, timeout=float(self.settings.tool_timeout_sec))
         self._set_state(State.THINKING, "ollama")
@@ -862,7 +1119,7 @@ class Assistant:
         try:
             self.memory.ingest(user_text, assistant_text, self.llm.generate)
         except Exception:
-            pass
+            log.exception("Memory ingest failed")
 
     def _poll_level(self) -> None:
         if self.overlay is None:

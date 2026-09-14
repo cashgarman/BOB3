@@ -103,6 +103,28 @@ class ChatStore:
             for row in rows
         ]
 
+    def list_sessions(self, limit: int = 20) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT s.id, s.created_at, s.title,
+                       (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS n
+                FROM sessions s
+                ORDER BY s.id DESC
+                LIMIT ?
+                """,
+                (int(limit),),
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "created_at": str(row["created_at"]),
+                "title": str(row["title"] or ""),
+                "count": int(row["n"] or 0),
+            }
+            for row in rows
+        ]
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()

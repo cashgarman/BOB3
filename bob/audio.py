@@ -11,7 +11,7 @@ import sounddevice as sd
 WAVE_BARS = 72
 PEAKS_PER_CHUNK = 8
 PLAY_SR = 24000
-PLAY_BLOCK = 512
+PLAY_BLOCK = 256
 
 
 def rms(samples: np.ndarray) -> float:
@@ -48,14 +48,16 @@ class AudioHub:
     def __init__(
         self,
         sample_rate: int = 16000,
-        blocksize: int = 1280,
+        blocksize: int = 512,
         input_device: str | int | None = None,
         output_device: str | int | None = None,
+        wasapi_exclusive: bool = False,
     ) -> None:
         self.sample_rate = sample_rate
         self.blocksize = blocksize
         self.input_device = input_device or None
         self.output_device = output_device or None
+        self.wasapi_exclusive = bool(wasapi_exclusive)
         self._lock = threading.Lock()
         self._listen_chunks: list[np.ndarray] = []
         self._listening = False
@@ -75,6 +77,8 @@ class AudioHub:
         self._epoch = 0
         self._active_epoch = 0
         self._ended = True
+        self._on_first_out: Callable[[], None] | None = None
+        self._first_out = False
 
     @property
     def active_epoch(self) -> int:
@@ -184,7 +188,7 @@ class AudioHub:
     def set_capture_muted(self, muted: bool) -> None:
         self._capture_muted = muted
 
-    def begin_utterance(self) -> int:
+    def begin_utterance(self, on_first_out: Callable[[], None] | None = None) -> int:
         with self._lock:
             self._epoch += 1
             self._active_epoch = self._epoch
@@ -194,6 +198,8 @@ class AudioHub:
             self._play_offset = 0
             self._cancel_play.clear()
             self._play_done.clear()
+            self._on_first_out = on_first_out
+            self._first_out = False
             epoch = self._active_epoch
         try:
             self._ensure_play_stream()
@@ -236,6 +242,8 @@ class AudioHub:
             self._play_offset = 0
             self._cancel_play.set()
             self._play_done.set()
+            self._on_first_out = None
+            self._first_out = True
 
     def stop_playback(self) -> None:
         self.cancel_playback()
@@ -269,18 +277,47 @@ class AudioHub:
             if not self._play_stream.active:
                 self._play_stream.start()
             return
-        kwargs = {}
+        kwargs: dict = {}
         if self.output_device:
             kwargs["device"] = self.output_device
-        self._play_stream = sd.OutputStream(
-            samplerate=self._play_sr,
-            channels=1,
-            dtype="float32",
-            blocksize=PLAY_BLOCK,
-            callback=self._on_output,
-            **kwargs,
-        )
-        self._play_stream.start()
+        extra = self._wasapi_extra()
+        if extra is not None:
+            kwargs["extra_settings"] = extra
+        try:
+            self._play_stream = sd.OutputStream(
+                samplerate=self._play_sr,
+                channels=1,
+                dtype="float32",
+                blocksize=PLAY_BLOCK,
+                callback=self._on_output,
+                **kwargs,
+            )
+            self._play_stream.start()
+        except Exception:
+            if extra is None:
+                raise
+            kwargs.pop("extra_settings", None)
+            self.wasapi_exclusive = False
+            self._play_stream = sd.OutputStream(
+                samplerate=self._play_sr,
+                channels=1,
+                dtype="float32",
+                blocksize=PLAY_BLOCK,
+                callback=self._on_output,
+                **kwargs,
+            )
+            self._play_stream.start()
+
+    def _wasapi_extra(self):
+        if not self.wasapi_exclusive:
+            return None
+        extra_cls = getattr(sd, "WasapiSettings", None)
+        if extra_cls is None:
+            return None
+        try:
+            return extra_cls(exclusive=True)
+        except Exception:
+            return None
 
     def _on_output(self, outdata, frames, time_info, status) -> None:  # noqa: ANN001
         if self._cancel_play.is_set():
@@ -307,6 +344,15 @@ class AudioHub:
             ended = self._ended
             drained = self._queue_drained()
         outdata[:, 0] = out
+        if needed < frames and not self._first_out:
+            self._first_out = True
+            cb = self._on_first_out
+            self._on_first_out = None
+            if cb is not None:
+                try:
+                    cb()
+                except Exception:
+                    pass
         if needed < frames:
             peaks = _chunk_peaks(out)
             n = min(int(peaks.size), WAVE_BARS)

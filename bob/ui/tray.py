@@ -6,6 +6,8 @@ from PIL import Image, ImageDraw
 import pystray
 
 from bob.ui.settings_dialog import COMPUTE, STT_MODELS, VOICES, WAKE_WORDS
+from bob.ui.theme import PRESET_KEYS, PRESETS
+from bob.voice_mood import MOOD_NAMES
 
 
 def _icon_image() -> Image.Image:
@@ -31,6 +33,30 @@ class Tray:
 
     def _settings(self):
         return self.app.settings
+
+    def _chat_items(self) -> list[pystray.MenuItem]:
+        items: list[pystray.MenuItem] = []
+        try:
+            current = int(getattr(self.app, "_session_id", 0) or 0)
+            for row in self.app.chat.list_sessions(8):
+                title = (row.get("title") or "Untitled").strip() or "Untitled"
+                if len(title) > 42:
+                    title = title[:41] + "…"
+                count = int(row.get("count") or 0)
+                shown = f"{title}  ({count})" if count else title
+                sid = int(row["id"])
+                items.append(
+                    pystray.MenuItem(
+                        shown,
+                        lambda *_, session=sid: self.app.load_session(session),
+                        checked=lambda _, session=sid: current == session,
+                    )
+                )
+        except Exception:
+            pass
+        if not items:
+            items.append(pystray.MenuItem("No saved chats", None, enabled=False))
+        return items
 
     def _menu(self) -> pystray.Menu:
         s = self._settings()
@@ -85,6 +111,7 @@ class Tray:
             pystray.MenuItem("Stop talking", lambda *_: self.app.stop_speaking()),
             bool_item("Show overlay", "show_overlay", self.app.set_overlay_visible),
             pystray.MenuItem("New conversation", lambda *_: self.app._new_chat()),
+            pystray.MenuItem("Conversations", pystray.Menu(*self._chat_items())),
             pystray.MenuItem("Memories…", lambda *_: self.app.open_memories()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
@@ -93,6 +120,10 @@ class Tray:
                     pystray.MenuItem("Input device", pystray.Menu(*input_items)),
                     pystray.MenuItem("Output device", pystray.Menu(*output_items)),
                     pystray.MenuItem("TTS voice", pystray.Menu(*[radio("tts_voice", v) for v in VOICES])),
+                    pystray.MenuItem(
+                        "Speech mood",
+                        pystray.Menu(*[radio("tts_mood", m) for m in MOOD_NAMES]),
+                    ),
                     pystray.MenuItem(
                         "TTS speed",
                         pystray.Menu(
@@ -145,6 +176,14 @@ class Tray:
                 "Startup",
                 pystray.Menu(bool_item("Start with Windows", "start_with_windows", self.app.set_start_with_windows)),
             ),
+            pystray.MenuItem(
+                "Appearance",
+                pystray.Menu(
+                    *[radio("theme", key, PRESETS[key].title) for key in PRESET_KEYS],
+                    pystray.Menu.SEPARATOR,
+                    pystray.MenuItem("Customize…", lambda *_: self.app.open_theme()),
+                ),
+            ),
             pystray.MenuItem("All settings…", lambda *_: self.app.open_settings()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", lambda *_: self.app.quit()),
@@ -159,6 +198,18 @@ class Tray:
 
     def run_detached(self) -> None:
         self.icon.run_detached()
+
+    def notify(self, message: str, title: str = "Bob") -> None:
+        """Show an OS balloon/toast from the tray icon."""
+        if not getattr(self.icon, "HAS_NOTIFICATION", False):
+            return
+        text = (message or "").strip()
+        if not text:
+            return
+        try:
+            self.icon.notify(text[:250], (title or "Bob")[:60])
+        except Exception:
+            pass
 
     def stop(self) -> None:
         try:

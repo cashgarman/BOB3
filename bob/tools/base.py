@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from bob.voice_mood import DEFAULT_MOOD, parse_mood
+
 MAX_RESULT_CHARS = 8000
 _NAME_OK = re.compile(r"[^A-Za-z0-9_-]")
 
@@ -29,10 +31,28 @@ class ToolContext:
     memory: Any = None
     data_dir: Path = Path("data")
     status: Callable[[str], None] = _silent
+    _mood: str = DEFAULT_MOOD
+    _on_mood: Callable[[str], None] = _silent
 
     @property
     def cancelled(self) -> bool:
         return self.cancel.is_set()
+
+    @property
+    def mood(self) -> str:
+        """Canonical mood that will colour this turn's spoken reply."""
+        return self._mood
+
+    def set_mood(self, mood: str) -> str:
+        """Change how Bob speaks the rest of this turn. Unknown names raise ToolError."""
+        name = parse_mood(mood)
+        if name is None:
+            from bob.voice_mood import MOOD_NAMES
+
+            raise ToolError(f"unknown mood {mood!r}. Use one of: {', '.join(MOOD_NAMES)}")
+        self._mood = name
+        self._on_mood(name)
+        return name
 
 
 @dataclass

@@ -104,7 +104,7 @@ def chat(registry: ToolRegistry, settings, timeout: float) -> None:
     except Exception as exc:
         sys.exit(f"Ollama is not reachable at {settings.ollama_host}: {exc}")
     cancel = threading.Event()
-    ctx = registry.context(cancel=cancel, status=lambda msg: print(f"   [status] {msg}"))
+    ctx = registry.context(cancel=cancel, status=lambda msg: print(f"   [status] {msg}"), on_mood=lambda m: print(f"   [mood] {m}"))
 
     def on_tool(name: str, arguments) -> str:
         print(f"   [tool] {name} {json.dumps(arguments, ensure_ascii=False)}")
@@ -162,17 +162,18 @@ def main() -> None:
         print("loading memory ...")
         memory.load()
 
-    # `load()` starts from a clean slate (built-ins plus data/tools), so import
-    # the example afterwards and register whatever it declared on top.
+    # `load()` always imports built-ins + data/tools. Snapshot the global
+    # `@tool` table first, then import the example so we can tell its tools
+    # apart from everything else when printing --schema.
     registry = ToolRegistry(DATA_DIR, settings=settings, memory=memory)
     registry.load()
-    before = {spec.name for spec in declared_tools()}
+    before_ids = {id(spec) for spec in declared_tools()}
     if args.example:
         print(f"loaded {import_example(args.example).name}")
     example_names = []
     for spec in declared_tools():
-        if spec.name not in before:
-            registry.add(spec)
+        registry.add(spec)
+        if id(spec) not in before_ids:
             example_names.append(spec.name)
     example_names.sort()
 
@@ -192,7 +193,10 @@ def main() -> None:
         if args.call:
             name, *pairs = args.call
             arguments = parse_kv(pairs)
-            ctx = registry.context(status=lambda msg: print(f"   [status] {msg}"))
+            ctx = registry.context(
+                status=lambda msg: print(f"   [status] {msg}"),
+                on_mood=lambda m: print(f"   [mood] {m}"),
+            )
             print(f"\n{name}({json.dumps(arguments, ensure_ascii=False)})")
             print("->", registry.invoke(name, arguments, ctx=ctx, timeout=timeout))
         elif args.chat:

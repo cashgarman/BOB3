@@ -24,6 +24,9 @@ class MemoriesWindow(ctk.CTkToplevel):
         super().__init__(master)
         theme = theming.current()
         self.title("Bob memories")
+        from bob.win32_app import apply_tk_icon
+
+        apply_tk_icon(self)
         self.geometry("560x520")
         self.attributes("-topmost", True)
         self.configure(**theme.window())
@@ -64,6 +67,7 @@ class MemoriesWindow(ctk.CTkToplevel):
 
     def apply_theme(self, theme: Theme) -> None:
         theming.restyle(self, theme)
+        self.refresh()
 
     def _auto(self) -> None:
         self.on_autosave(bool(self.auto.get()))
@@ -126,6 +130,14 @@ class MemoriesWindow(ctk.CTkToplevel):
         self.refresh()
 
     def _forget(self) -> None:
+        from tkinter import messagebox
+
+        if not messagebox.askyesno(
+            "Forget all memories",
+            "Delete every stored memory? This cannot be undone.",
+            parent=self,
+        ):
+            return
         self.on_forget_all()
         self._selected = None
         self.editor.delete("1.0", "end")

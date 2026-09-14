@@ -9,5 +9,15 @@ description = "Local GPU speech-to-speech desktop assistant"
 requires-python = ">=3.12,<3.13"
 readme = "README.md"
 
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
 [tool.setuptools.packages.find]
 include = ["bob*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]

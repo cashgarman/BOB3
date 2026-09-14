@@ -12,13 +12,20 @@ from bob.ui.transcript import paint_transcript
 
 
 class Overlay(ctk.CTk):
-    def __init__(self, hotkey: str, on_toggle: Callable[[], None], on_quit: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        hotkey: str,
+        on_toggle: Callable[[], None],
+        on_quit: Callable[[], None],
+        on_submit: Callable[[str], None] | None = None,
+    ) -> None:
         theme = theming.current()
         ctk.set_appearance_mode(theme.appearance)
         ctk.set_default_color_theme("dark-blue")
         super().__init__()
         self.on_toggle = on_toggle
         self.on_quit = on_quit
+        self.on_submit = on_submit
         self.on_hide = None
         self._messages: list[dict] = []
         self._pending_user = ""
@@ -28,8 +35,8 @@ class Overlay(ctk.CTk):
         from bob.win32_app import apply_tk_icon
 
         apply_tk_icon(self)
-        self.geometry("560x420+40+40")
-        self.minsize(420, 280)
+        self.geometry("560x460+40+40")
+        self.minsize(420, 320)
         self.resizable(True, True)
         self.attributes("-topmost", True)
         self.configure(**theme.window())
@@ -53,7 +60,7 @@ class Overlay(ctk.CTk):
                 font=theme.font(12),
                 wraplength=520,
                 justify="left",
-                **theme.label(muted=True),
+                **theme.label_style(muted=True),
             ),
             "muted",
         )
@@ -64,8 +71,35 @@ class Overlay(ctk.CTk):
         self.level.set(0)
 
         self.transcript = ctk.CTkTextbox(self, font=theme.font(13), wrap="word", **theme.textbox())
-        self.transcript.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+        self.transcript.pack(fill="both", expand=True, padx=16, pady=(0, 8))
         self._paint()
+
+        composer = ctk.CTkFrame(self, fg_color="transparent")
+        composer.pack(fill="x", padx=16, pady=(0, 12))
+        self.composer = ctk.CTkEntry(composer, placeholder_text="Type a message and press Enter", **theme.entry())
+        self.composer.pack(side="left", fill="x", expand=True)
+        inner = getattr(self.composer, "_entry", None)
+        if inner is not None:
+            inner.bind("<Return>", self._submit_typed)
+        else:
+            self.composer.bind("<Return>", self._submit_typed)
+        self.send_btn = ctk.CTkButton(
+            composer,
+            text="Send",
+            width=72,
+            command=self._submit_typed,
+            **theme.button(),
+        )
+        self.send_btn.pack(side="right", padx=(8, 0))
+
+    def _submit_typed(self, _event=None) -> None:  # noqa: ANN001
+        text = (self.composer.get() or "").strip()
+        if not text or self.on_submit is None:
+            return
+        if self._state == State.LOADING:
+            return
+        self.composer.delete(0, "end")
+        self.on_submit(text)
 
     def apply_theme(self, theme: Theme) -> None:
         theming.restyle(self, theme)

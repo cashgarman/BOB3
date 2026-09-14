@@ -14,22 +14,26 @@ DATA_DIR = ROOT / "data"
 
 @dataclass
 class Settings:
-    llm_model: str = "qwen2.5:latest"
-    stt_model: str = "large-v3-turbo"
+    llm_model: str = "qwen3:4b"
+    stt_model: str = "parakeet-tdt-0.6b-v3"
     stt_compute_type: str = "int8_float16"
     llm_num_ctx: int = 4096
     tts_voice: str = "af_heart"
     tts_speed: float = 1.0
+    tts_mood: str = "neutral"
     wake_word: str = "hey_jarvis"
     wake_word_enabled: bool = True
     wake_threshold: float = 0.5
     hotkey: str = "ctrl+shift+space"
-    max_silence_sec: float = 0.0
-    auto_endpoint: bool = False
+    max_silence_sec: float = 0.2
+    auto_endpoint: bool = True
     endpoint_silence_ms: int = 700
+    turn_detector: str = "smart_turn"
+    turn_min_silence_ms: int = 200
+    turn_max_silence_ms: int = 800
     barge_in: bool = True
     barge_in_speech_ms: int = 250
-    stt_partial_interval_ms: int = 250
+    stt_partial_interval_ms: int = 500
     stt_commit_silence_ms: int = 500
     vad_threshold: float = 0.5
     sample_rate: int = 16000
@@ -45,6 +49,7 @@ class Settings:
     start_with_windows: bool = False
     input_device: str = ""
     output_device: str = ""
+    wasapi_exclusive: bool = False
     memory_autosave: bool = True
     memory_max_inject: int = 8
     tools_enabled: bool = True
@@ -91,4 +96,11 @@ def load_settings(path: Path = CONFIG_PATH) -> Settings:
         coerced["theme_overrides"] = {}
     if "theme" in coerced:
         coerced["theme"] = str(coerced["theme"] or "midnight")
+    if "tts_mood" in coerced:
+        from bob.voice_mood import resolve_mood
+
+        coerced["tts_mood"] = resolve_mood(coerced.get("tts_mood"))
+    if "turn_detector" in coerced:
+        mode = str(coerced.get("turn_detector") or "smart_turn").strip().lower()
+        coerced["turn_detector"] = mode if mode in {"smart_turn", "silence"} else "smart_turn"
     return Settings(**coerced)

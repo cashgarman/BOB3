@@ -57,6 +57,9 @@ class ThemeDialog(ctk.CTkToplevel):
 
         theme = self._draft
         self.title("Bob theme")
+        from bob.win32_app import apply_tk_icon
+
+        apply_tk_icon(self)
         self.geometry("520x680")
         self.minsize(440, 480)
         self.attributes("-topmost", True)
@@ -69,7 +72,7 @@ class ThemeDialog(ctk.CTkToplevel):
 
         # -- preset ---------------------------------------------------------
         self._heading(body, "Preset")
-        self.preset_var = ctk.StringVar(value=preset(self._preset_key).label)
+        self.preset_var = ctk.StringVar(value=preset(self._preset_key).title)
         self.preset_box = ctk.CTkComboBox(
             body,
             values=labels_for(PRESET_KEYS),
@@ -131,7 +134,7 @@ class ThemeDialog(ctk.CTkToplevel):
         )
         self.preview_status.pack(anchor="w", padx=12, pady=(10, 0))
         self.preview_meta = set_role(
-            ctk.CTkLabel(self.preview, text="Speaking  ·  CTRL+SHIFT+SPACE to send", font=theme.font(11), **theme.label(True)),
+            ctk.CTkLabel(self.preview, text="Speaking  ·  CTRL+SHIFT+SPACE to send", font=theme.font(11), **theme.label_style(True)),
             "muted",
         )
         self.preview_meta.pack(anchor="w", padx=12)
@@ -160,21 +163,21 @@ class ThemeDialog(ctk.CTkToplevel):
     def _heading(self, parent, text: str) -> None:
         theme = self._draft
         set_role(
-            ctk.CTkLabel(parent, text=text.upper(), anchor="w", font=theme.font(11, "bold"), **theme.label(True)),
+            ctk.CTkLabel(parent, text=text.upper(), anchor="w", font=theme.font(11, "bold"), **theme.label_style(True)),
             "muted",
         ).pack(fill="x", pady=(12, 2))
 
     def _hint(self, parent, text: str) -> None:
         theme = self._draft
         set_role(
-            ctk.CTkLabel(parent, text=text, anchor="w", font=theme.font(11), wraplength=460, **theme.label(True)),
+            ctk.CTkLabel(parent, text=text, anchor="w", font=theme.font(11), wraplength=460, **theme.label_style(True)),
             "muted",
         ).pack(fill="x", pady=(2, 2))
 
     def _color_row(self, parent, row: int, slot: str, label: str) -> None:
         theme = self._draft
         value = theme.color(slot)
-        ctk.CTkLabel(parent, text=label, anchor="w", **theme.label()).grid(row=row, column=0, sticky="ew", pady=3)
+        ctk.CTkLabel(parent, text=label, anchor="w", **theme.label_style()).grid(row=row, column=0, sticky="ew", pady=3)
         var = ctk.StringVar(value=value)
         self._hex_vars[slot] = var
         entry = ctk.CTkEntry(parent, textvariable=var, width=96, **theme.entry())

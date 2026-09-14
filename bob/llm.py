@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -16,8 +17,12 @@ LARGE_MODEL_BYTES = 6 * 1024 * 1024 * 1024
 STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
 TOOL_GUIDANCE = (
     "You can call tools. Use one only when it gives you something you cannot know on your own, "
-    "such as the current time or the user's saved notes. Never read tool names, arguments, or JSON "
-    "aloud: once a tool returns, just say the answer in a short spoken sentence."
+    "such as the current time or the user's saved notes. "
+    "When the user's feelings or the news call for it, call set_speech_mood first "
+    "(calm, warm, upbeat, excited, serious, sad, sorry, whisper, hurried) and then answer; "
+    "never say the mood name aloud. "
+    "Never read tool names, arguments, or JSON aloud: once a tool returns, just say the answer "
+    "in a short spoken sentence."
 )
 
 
@@ -31,6 +36,11 @@ class OllamaChat:
         self.history: list[dict[str, Any]] = []
         self.session_summary = ""
         self._summary_lock = threading.Lock()
+        self.last_prompt_eval_count: int | None = None
+        self.last_prompt_eval_ms: float | None = None
+        self.last_eval_count: int | None = None
+        self.last_eval_ms: float | None = None
+        self.last_ttft_ms: float | None = None
 
     def ping(self) -> None:
         with httpx.Client(timeout=5.0) as client:
@@ -51,14 +61,46 @@ class OllamaChat:
                 return int(item.get("size") or 0) > LARGE_MODEL_BYTES
         return False
 
-    def preload(self) -> None:
-        payload = {
+    def snapshot(self) -> tuple[list[dict[str, Any]], str]:
+        return [dict(msg) for msg in self.history], self.session_summary
+
+    def restore(self, history: list[dict[str, Any]], summary: str) -> None:
+        self.history = [dict(msg) for msg in history]
+        self.session_summary = summary
+
+    def _thinks(self) -> bool:
+        return "qwen3" in (self.model or "").lower()
+
+    def _apply_think(self, payload: dict[str, Any]) -> None:
+        if self._thinks():
+            payload["think"] = False
+
+    def _system(self, with_tools: bool = False) -> str:
+        parts = [self.system_prompt.strip()]
+        if with_tools:
+            parts.append(TOOL_GUIDANCE)
+        return "\n\n".join(p for p in parts if p)
+
+    def _user_with_context(self, user_text: str, memory_block: str = "") -> str:
+        parts: list[str] = []
+        if self.session_summary.strip():
+            parts.append(f"Session so far:\n{self.session_summary.strip()}")
+        if (memory_block or "").strip():
+            parts.append(memory_block.strip())
+        parts.append(user_text or " ")
+        return "\n\n".join(parts)
+
+    def preload(self, tools: list[dict[str, Any]] | None = None) -> None:
+        payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [{"role": "system", "content": self.system_prompt}],
+            "messages": [{"role": "system", "content": self._system(with_tools=bool(tools))}],
             "stream": False,
             "keep_alive": -1,
             "options": {"num_ctx": self.num_ctx, "num_predict": 1},
         }
+        self._apply_think(payload)
+        if tools:
+            payload["tools"] = tools
         with httpx.Client(timeout=180.0) as client:
             r = client.post(f"{self.host}/api/chat", json=payload)
             r.raise_for_status()
@@ -81,6 +123,7 @@ class OllamaChat:
             # every memory-extraction or summary call.
             "options": {"num_ctx": self.num_ctx, "num_predict": num_predict, "temperature": 0.2},
         }
+        self._apply_think(payload)
         with httpx.Client(timeout=120.0) as client:
             r = client.post(f"{self.host}/api/chat", json=payload)
             r.raise_for_status()
@@ -96,46 +139,67 @@ class OllamaChat:
         max_rounds: int = 1,
     ) -> Iterator[str]:
         """Stream a spoken reply, running any tool the model asks for first."""
-        self.history.append({"role": "user", "content": user_text})
+        spoken_user = user_text
+        self.history.append({"role": "user", "content": self._user_with_context(user_text, memory_block)})
         self._trim()
         agentic = bool(tools) and on_tool is not None
-        system = self._system_with_memory(memory_block, with_tools=agentic)
+        system = self._system(with_tools=agentic)
         tool_rounds = max(1, int(max_rounds)) if agentic else 0
-        for index in range(tool_rounds + 1):
-            if cancel is not None and cancel.is_set():
-                return
-            # The last pass drops the tools so the model has to answer in words.
-            offered = tools if index < tool_rounds else None
-            spoken: list[str] = []
-            try:
-                content, calls = yield from self._round(system, offered, cancel, spoken)
-            except GeneratorExit:
-                # Caller stopped consuming (barge-in / hotkey). Keep what was
-                # already said so the next turn knows what Bob got through.
-                partial = "".join(spoken).strip()
-                if partial:
-                    self.history.append({"role": "assistant", "content": partial})
-                raise
-            if content.strip() or calls:
-                message: dict[str, Any] = {"role": "assistant", "content": content}
-                if calls:
-                    message["tool_calls"] = calls
-                self.history.append(message)
-            if not calls:
-                break
-            for call in calls:
+        try:
+            for index in range(tool_rounds + 1):
                 if cancel is not None and cancel.is_set():
                     return
-                function = call.get("function") or {}
-                name = str(function.get("name") or "").strip()
-                if not name:
-                    continue
+                # The last pass drops the tools so the model has to answer in words.
+                offered = tools if index < tool_rounds else None
+                spoken: list[str] = []
                 try:
-                    result = on_tool(name, function.get("arguments"))
-                except Exception as exc:
-                    result = f"Error: tool '{name}' failed: {exc}"
-                self.history.append({"role": "tool", "tool_name": name, "content": result})
-        self._trim()
+                    content, calls = yield from self._round(system, offered, cancel, spoken)
+                except GeneratorExit:
+                    # Caller stopped consuming (barge-in / hotkey). Keep what was
+                    # already said so the next turn knows what Bob got through.
+                    partial = "".join(spoken).strip()
+                    if partial:
+                        self.history.append({"role": "assistant", "content": partial})
+                    raise
+                if content.strip() or calls:
+                    message: dict[str, Any] = {"role": "assistant", "content": content}
+                    if calls:
+                        message["tool_calls"] = calls
+                    self.history.append(message)
+                if not calls:
+                    break
+                for call in calls:
+                    if cancel is not None and cancel.is_set():
+                        return
+                    function = call.get("function") or {}
+                    name = str(function.get("name") or "").strip()
+                    if not name:
+                        continue
+                    try:
+                        result = on_tool(name, function.get("arguments"))
+                    except Exception as exc:
+                        result = f"Error: tool '{name}' failed: {exc}"
+                    self.history.append({"role": "tool", "tool_name": name, "content": result})
+            self._trim()
+        finally:
+            self._rewrite_last_user(spoken_user)
+
+    def _rewrite_last_user(self, spoken: str) -> None:
+        """Keep history as the words the user said so memory is not duplicated next turn."""
+        for msg in reversed(self.history):
+            if msg.get("role") == "user":
+                msg["content"] = spoken
+                return
+
+    def _record_eval(self, data: dict[str, Any]) -> None:
+        count = data.get("prompt_eval_count")
+        dur = data.get("prompt_eval_duration")
+        self.last_prompt_eval_count = int(count) if count is not None else None
+        self.last_prompt_eval_ms = (float(dur) / 1e6) if dur is not None else None
+        ntok = data.get("eval_count")
+        edur = data.get("eval_duration")
+        self.last_eval_count = int(ntok) if ntok is not None else None
+        self.last_eval_ms = (float(edur) / 1e6) if edur is not None else None
 
     def _round(
         self,
@@ -159,11 +223,14 @@ class OllamaChat:
                 "temperature": 0.7,
             },
         }
+        self._apply_think(payload)
         if tools:
             payload["tools"] = tools
         parts: list[str] = []
         calls: list[dict[str, Any]] = []
         speaking = False
+        first_token = True
+        t0 = time.perf_counter()
         with httpx.Client(timeout=STREAM_TIMEOUT) as client:
             with client.stream("POST", f"{self.host}/api/chat", json=payload) as resp:
                 resp.raise_for_status()
@@ -188,22 +255,16 @@ class OllamaChat:
                         # Text before a tool call is a preamble, not the answer.
                         if speaking or not calls:
                             speaking = True
+                            if first_token:
+                                self.last_ttft_ms = (time.perf_counter() - t0) * 1000.0
+                                first_token = False
                             if spoken is not None:
                                 spoken.append(chunk)
                             yield chunk
                     if data.get("done"):
+                        self._record_eval(data)
                         break
         return "".join(parts), calls
-
-    def _system_with_memory(self, memory_block: str, with_tools: bool = False) -> str:
-        parts = [self.system_prompt.strip()]
-        if with_tools:
-            parts.append(TOOL_GUIDANCE)
-        if self.session_summary.strip():
-            parts.append(f"Session so far:\n{self.session_summary.strip()}")
-        if memory_block.strip():
-            parts.append(memory_block.strip())
-        return "\n\n".join(parts)
 
     def _trim(self) -> None:
         max_msgs = max(2, self.max_turns * 2)

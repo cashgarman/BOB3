@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 import winreg
@@ -15,7 +14,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bob import __version__
-from bob.win32_app import APP_ID, APP_NAME, EXE_NAME, PUBLISHER, branded_exe, icon_path, project_root
+from bob.win32_app import APP_ID, APP_NAME, EXE_NAME, PUBLISHER, branded_exe, icon_path
 
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Bob"
 APP_PATHS_KEY = r"Software\Microsoft\Windows\CurrentVersion\App Paths\Bob.exe"
@@ -30,13 +29,6 @@ def _start_menu_lnk() -> Path:
 
 def _desktop_lnk() -> Path:
     return Path(os.environ["USERPROFILE"]) / "Desktop" / "Bob.lnk"
-
-
-def _pythonw() -> Path:
-    path = ROOT / ".venv" / "Scripts" / "pythonw.exe"
-    if not path.is_file():
-        raise FileNotFoundError("No .venv pythonw.exe. Run .\\setup.ps1 first.")
-    return path
 
 
 def write_icon(dest: Path) -> Path:
@@ -115,27 +107,25 @@ def write_shortcut(lnk: Path, target: Path, ico: Path, helper: Path) -> None:
 
 def write_bob_exe(ico: Path) -> Path:
     dest = branded_exe()
-    src = _pythonw()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dest)
-    import importlib.util
-
-    spec = importlib.util.spec_from_file_location(
-        "bob_pe_stamp", Path(__file__).with_name("pe_stamp.py")
-    )
-    if spec is None or spec.loader is None:
-        raise ImportError("Could not load pe_stamp.py")
-    pe_stamp = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(pe_stamp)
-
-    pe_stamp.stamp_exe(
-        dest,
-        ico,
-        file_description=APP_NAME,
-        product_name=APP_NAME,
-        company=PUBLISHER,
-        original_filename=EXE_NAME,
-        version=__version__,
+    if not CSC.is_file():
+        raise FileNotFoundError(f"C# compiler not found: {CSC}")
+    src = Path(__file__).with_name("bob_host.cs")
+    fx = CSC.parent
+    subprocess.check_call(
+        [
+            str(CSC),
+            "/nologo",
+            "/optimize",
+            "/target:winexe",
+            "/platform:x64",
+            f"/reference:{fx / 'System.Windows.Forms.dll'}",
+            f"/reference:{fx / 'System.Drawing.dll'}",
+            f"/win32icon:{ico}",
+            f"/out:{dest}",
+            str(src),
+        ],
+        cwd=str(src.parent),
     )
     return dest
 
@@ -254,7 +244,7 @@ def main() -> int:
     print(f"  Start Menu: {_start_menu_lnk()}")
     print(f"  Apps list:  Settings > Apps > Installed apps")
     print("Launch Bob once, then open Settings > Personalization > Taskbar >")
-    print("Other system tray icons — Bob should be listed there.")
+    print("Other system tray icons. Bob should be listed there.")
     return 0
 
 

@@ -18,6 +18,7 @@ BUILTIN_MODULES = (
     "bob.tools.builtin.web",
     "bob.tools.builtin.notes",
     "bob.tools.builtin.recall",
+    "bob.tools.builtin.mood",
 )
 
 _DECLARED: dict[str, ToolSpec] = {}
@@ -141,15 +142,22 @@ class ToolRegistry:
         self,
         cancel: threading.Event | None = None,
         status: Callable[[str], None] | None = None,
+        mood: str | None = None,
+        on_mood: Callable[[str], None] | None = None,
     ) -> ToolContext:
+        from bob.voice_mood import resolve_mood
+
         ctx = ToolContext(
             cancel=cancel or threading.Event(),
             settings=self.settings,
             memory=self.memory,
             data_dir=self.data_dir,
+            _mood=resolve_mood(mood),
         )
         if status is not None:
             ctx.status = status
+        if on_mood is not None:
+            ctx._on_mood = on_mood
         return ctx
 
     def invoke(

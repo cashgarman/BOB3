@@ -79,8 +79,11 @@ class VectorStore:
         self._table.add([row])
 
     def delete(self, memory_id: str) -> None:
+        mid = str(memory_id or "")
+        if not mid or any(ch in mid for ch in "'\";"):
+            return
         try:
-            self._table.delete(f"id = '{memory_id}'")
+            self._table.delete(f"id = '{mid}'")
         except Exception:
             pass
 
