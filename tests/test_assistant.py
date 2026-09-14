@@ -313,6 +313,29 @@ def test_assistant_set_state_drives_toast(ui, tmp_path, monkeypatch):
     toast.destroy()
 
 
+def test_assistant_set_state_keeps_pinned_toast_on_idle(ui, tmp_path, monkeypatch):
+    from bob.ui.listen_toast import ListenToast
+    from tests.helpers import pump
+
+    assistant, *_ = _make_assistant(tmp_path, monkeypatch)
+    assistant.overlay = ui
+    assistant.hud = None
+    toast = ListenToast(ui)
+    pump(ui, 3)
+    assistant.toast = toast
+    assistant._ui = lambda fn: fn()
+
+    assistant._set_state(State.SPEAKING, "reply")
+    pump(ui)
+    toast._toggle_pin()
+
+    assistant._set_state(State.IDLE, "ready")
+    pump(ui)
+    assert toast.is_open() is True
+    assert toast.status.cget("text") == "IDLE"
+    toast.destroy()
+
+
 def test_assistant_pipeline_typed_path(ui, tmp_path, monkeypatch):
     assistant, audio, stt_stream, speech, llm = _make_assistant(tmp_path, monkeypatch)
     assistant.overlay = ui
@@ -337,3 +360,19 @@ def test_load_toast_text_mapping():
     assert _load_toast_text("Speech recognition") == "Loading speech recognition…"
     assert _load_toast_text("Custom status") == "Custom status"
     assert _load_toast_text("") == ""
+
+
+def test_notify_ready_toast_sent_once(tmp_path, monkeypatch):
+    from bob.app import Assistant
+    from bob.settings import Settings
+
+    sent: list[tuple[str, str]] = []
+
+    def capture(msg, title="Bob is loading", *, replace=True):
+        sent.append((title, msg))
+
+    monkeypatch.setattr("bob.os_toast.show", capture)
+    assistant = Assistant(settings=Settings())
+    assistant._notify_ready("CTRL+SHIFT+SPACE · llama3")
+    assistant._notify_ready("ignored")
+    assert sent == [("Bob is ready", "CTRL+SHIFT+SPACE · llama3")]

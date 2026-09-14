@@ -6,6 +6,8 @@ from typing import Any
 
 import yaml
 
+from bob.prompts import load_system_prompt
+
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config.yaml"
 MODELS_DIR = ROOT / "models"
@@ -40,11 +42,7 @@ class Settings:
     ollama_host: str = "http://127.0.0.1:11434"
     ollama_gpu_overhead: int = 1610612736
     max_history_turns: int = 12
-    system_prompt: str = (
-        "You are Bob, a local voice assistant. Speak in short, natural sentences "
-        "meant to be heard aloud. No markdown, bullet lists, or code fences unless "
-        "the user asks. Keep answers concise."
-    )
+    system_prompt: str = field(default_factory=load_system_prompt)
     show_overlay: bool = True
     start_with_windows: bool = False
     input_device: str = ""
@@ -107,4 +105,6 @@ def load_settings(path: Path = CONFIG_PATH) -> Settings:
     if "turn_detector" in coerced:
         mode = str(coerced.get("turn_detector") or "smart_turn").strip().lower()
         coerced["turn_detector"] = mode if mode in {"smart_turn", "silence"} else "smart_turn"
+    if "system_prompt" not in coerced:
+        coerced["system_prompt"] = load_system_prompt()
     return Settings(**coerced)

@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from bob.prompts import load_system_prompt, load_tool_guidance
+
 log = logging.getLogger(__name__)
 
 LARGE_MODEL_BYTES = 6 * 1024 * 1024 * 1024
@@ -94,18 +96,6 @@ def _ollama_error_body(raw: str, model: str) -> str | None:
 # Streaming replies: never hang forever on a dead socket, but allow a slow
 # first token while Ollama pages the model in.
 STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=10.0)
-TOOL_GUIDANCE = (
-    "You can call tools. Use one only when it gives you something you cannot know on your own, "
-    "such as the current time, the user's saved notes, or timestamps from this chat via "
-    "conversation_log. "
-    "When the user's feelings or the news call for it, call set_speech_mood first "
-    "(calm, warm, upbeat, excited, serious, sad, sorry, whisper, hurried) and then answer; "
-    "never say the mood name aloud. "
-    "Never read tool names, arguments, or JSON aloud: once a tool returns, just say the answer "
-    "in a short spoken sentence. "
-    "Do not tell the user you are checking or looking something up — call the tool silently, "
-    "then answer in one breath."
-)
 
 
 class OllamaChat:
@@ -162,9 +152,9 @@ class OllamaChat:
             payload["think"] = False
 
     def _system(self, with_tools: bool = False) -> str:
-        parts = [self.system_prompt.strip()]
+        parts = [load_system_prompt()]
         if with_tools:
-            parts.append(TOOL_GUIDANCE)
+            parts.append(load_tool_guidance())
         return "\n\n".join(p for p in parts if p)
 
     def _user_with_context(self, user_text: str, memory_block: str = "") -> str:

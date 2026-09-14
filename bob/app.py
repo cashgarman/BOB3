@@ -10,6 +10,7 @@ from bob.chat_store import ChatStore
 from bob.hotkeys import GlobalHotkey
 from bob.llm import OllamaChat
 from bob.memory.service import MemoryService
+from bob.prompts import save_system_prompt
 from bob.settings import DATA_DIR, MODELS_DIR, Settings, load_settings
 from bob.state import State
 from bob.startup import is_enabled as startup_is_enabled
@@ -92,6 +93,7 @@ class Assistant:
         self._memories_win = None
         self._settings_win = None
         self._theme_win = None
+        self._ready_toast_sent = False
         self.memory = MemoryService(DATA_DIR / "memory")
         self.tools = ToolRegistry(DATA_DIR, settings=self.settings, memory=self.memory)
         self.chat = ChatStore(DATA_DIR / "chat.db")
@@ -173,8 +175,7 @@ class Assistant:
 
     def _boot_worker(self) -> None:
         def status(msg: str) -> None:
-            self._ui(lambda: self.overlay.set_state(State.LOADING, msg))
-            self._toast_load(msg)
+            self._ui(lambda m=msg: self.overlay.set_state(State.LOADING, m))
 
         try:
             MODELS_DIR.mkdir(parents=True, exist_ok=True)
@@ -188,10 +189,6 @@ class Assistant:
                 # (re)loaded from the tray or on the first turn.
                 ollama_ok = False
                 log.warning("Ollama unreachable at %s: %s", self.llm.host, exc)
-                self._toast_load(
-                    f"Ollama is not reachable at {self.llm.host}. Start it, then reconnect from the tray.",
-                    title="Bob",
-                )
                 self._ui(
                     lambda: self.overlay.set_reply(
                         f"Ollama is not reachable at {self.llm.host}. Start it, then use "
@@ -207,10 +204,6 @@ class Assistant:
                 if not is_parakeet(self.settings.stt_model):
                     raise
                 log.warning("Parakeet failed (%s); falling back to Whisper large-v3-turbo", exc)
-                self._toast_load(
-                    "Parakeet unavailable — using Whisper instead.",
-                    title="Bob",
-                )
                 from bob.stt import SpeechToText
 
                 self.stt = SpeechToText(
@@ -254,19 +247,24 @@ class Assistant:
                     self.llm.preload()
                 except Exception as exc:
                     log.warning("Model preload failed: %s", exc)
-                    self._toast_load(f"Model load failed: {exc}", title="Bob")
                     self._ui(lambda: self.overlay.set_reply(f"Model load failed: {exc}"))
             detail = self._ready_detail()
             self._set_state(State.IDLE, detail)
             if self.tray:
                 self._ui(self.tray.refresh)
-            self._toast_load(f"Ready — {detail}", title="Bob")
+            self._notify_ready(detail)
             log.info("Ready: %s", detail)
         except Exception as exc:
             log.exception("Boot failed")
             self._toast_load(str(exc), title="Bob failed to start")
             self._set_state(State.ERROR, str(exc)[:80])
             self._ui(lambda: self.overlay.set_reply(str(exc)))
+
+    def _notify_ready(self, detail: str = "") -> None:
+        if self._ready_toast_sent:
+            return
+        self._ready_toast_sent = True
+        self._toast_load(detail, title="Bob is ready")
 
     def _toast_load(self, msg: str, title: str = "Bob is loading") -> None:
         text = _load_toast_text(msg)
@@ -384,7 +382,8 @@ class Assistant:
             self.llm.reset_tools_support()
         self.llm.model = self.settings.llm_model
         self.llm.num_ctx = self.settings.llm_num_ctx
-        self.llm.system_prompt = self.settings.system_prompt
+        if "system_prompt" in values:
+            save_system_prompt(self.settings.system_prompt)
         self.llm.max_turns = self.settings.max_history_turns
         self.tts.voice = self.settings.tts_voice
         from bob.tts import clamp_speed
@@ -422,7 +421,7 @@ class Assistant:
         elif field == "llm_num_ctx":
             self.llm.num_ctx = int(value)
         elif field == "system_prompt":
-            self.llm.system_prompt = str(value)
+            save_system_prompt(str(value))
         elif field == "max_history_turns":
             self.llm.max_turns = int(value)
         elif field == "ollama_host":
@@ -893,13 +892,8 @@ class Assistant:
             if self._overlay_viewable() or iconic:
                 self.overlay.set_phase(phase)
                 self.overlay.present()
-                if self.hud:
-                    self.hud.hide()
-                return
             if self.hud:
-                self.hud.set_phase(phase)
-                self.hud.present()
-                self.hud.set_hotkey(self.settings.hotkey)
+                self.hud.hide()
 
         self._ui(apply)
 
@@ -921,6 +915,8 @@ class Assistant:
                 self.overlay.set_transcript(messages, pending_user, pending_reply)
             if self.hud:
                 self.hud.set_transcript(messages, pending_user, pending_reply)
+            if self.toast:
+                self.toast.set_transcript(messages, pending_user, pending_reply)
 
         if self.overlay is None:
             return
@@ -1247,7 +1243,8 @@ class Assistant:
             if self.hud and self.hud.is_open():
                 self.hud.set_state(state, detail)
             if self.toast:
-                if state in {State.LISTENING, State.THINKING, State.SPEAKING}:
+                active = state in {State.LISTENING, State.THINKING, State.SPEAKING}
+                if active or self.toast.is_pinned():
                     self.toast.set_state(state, detail)
                 else:
                     self.toast.hide()
@@ -1277,7 +1274,7 @@ class Assistant:
         if self.tray:
             self.tray.stop()
         if self.toast:
-            self.toast.hide()
+            self.toast.hide(force=True)
         try:
             self.tools.close()
         except Exception:

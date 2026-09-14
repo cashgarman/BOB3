@@ -12,9 +12,11 @@ from bob.audio import WAVE_BARS
 from bob.state import State
 from bob.ui import theme as theming
 from bob.ui.theme import Theme, set_role
+from bob.ui.transcript import paint_transcript
 
-TOAST_W = 364
-TOAST_H = 118
+TOAST_W = 400
+TOAST_H = 268
+TRANSCRIPT_H = 120
 MARGIN = 16
 
 
@@ -105,15 +107,19 @@ def _restore_foreground(hwnd: int) -> None:
 
 
 class ListenToast(ctk.CTkToplevel):
-    """Windows toast-style banner: live mic waveform plus Bob's current state."""
+    """Windows toast-style banner with live waveform, transcript, and optional pin."""
 
     def __init__(self, master: ctk.CTk, on_click: Callable[[], None] | None = None) -> None:
         super().__init__(master)
         theme = theming.current()
         self.on_click = on_click
         self._open = False
+        self._pinned = False
         self._state = State.LISTENING
         self._shown = [0.08] * WAVE_BARS
+        self._messages: list[dict] = []
+        self._pending_user = ""
+        self._pending_reply = ""
         self.overrideredirect(True)
         self.resizable(False, False)
         set_role(self, "skip")
@@ -140,6 +146,19 @@ class ListenToast(ctk.CTkToplevel):
             "muted",
         )
         self.app_name.pack(side="left")
+        self.pin_btn = set_role(
+            ctk.CTkButton(
+                header,
+                text="📍",
+                width=28,
+                height=28,
+                font=theme.font(14),
+                command=self._toggle_pin,
+                **theme.button("surface_off"),
+            ),
+            "surface_off",
+        )
+        self.pin_btn.pack(side="right")
         self.status = set_role(
             ctk.CTkLabel(
                 header,
@@ -150,17 +169,27 @@ class ListenToast(ctk.CTkToplevel):
             ),
             "status",
         )
-        self.status.pack(side="right")
+        self.status.pack(side="right", padx=(0, 6))
 
         self.wave = tk.Canvas(
             inner,
-            height=44,
+            height=36,
             bg=theme.surface,
             highlightthickness=0,
             bd=0,
             cursor="hand2",
         )
         self.wave.pack(fill="x", pady=(8, 6))
+
+        self.transcript = ctk.CTkTextbox(
+            inner,
+            height=TRANSCRIPT_H,
+            font=theme.font(12),
+            wrap="word",
+            **theme.textbox(),
+        )
+        self.transcript.pack(fill="x", pady=(0, 6))
+        self._paint_transcript()
 
         self.meta = set_role(
             ctk.CTkLabel(
@@ -186,11 +215,16 @@ class ListenToast(ctk.CTkToplevel):
         self.inner.configure(fg_color=theme.surface)
         self.wave.configure(bg=theme.surface)
         self.status.configure(text_color=theme.state_color(self._state))
+        self._sync_pin_button()
         self._style()
         self._paint()
+        self._paint_transcript()
 
     def is_open(self) -> bool:
         return self._open
+
+    def is_pinned(self) -> bool:
+        return self._pinned
 
     def present(self) -> None:
         fg = 0
@@ -214,7 +248,9 @@ class ListenToast(ctk.CTkToplevel):
         self._open = True
         self._paint()
 
-    def hide(self) -> None:
+    def hide(self, *, force: bool = False) -> None:
+        if self._pinned and not force:
+            return
         self.withdraw()
         self._open = False
 
@@ -226,6 +262,17 @@ class ListenToast(ctk.CTkToplevel):
             self.meta.configure(text=detail)
         if not self._open:
             self.present()
+
+    def set_transcript(
+        self,
+        messages: Sequence[dict],
+        pending_user: str = "",
+        pending_reply: str = "",
+    ) -> None:
+        self._messages = list(messages)
+        self._pending_user = pending_user
+        self._pending_reply = pending_reply
+        self._paint_transcript()
 
     def set_waveform(self, bars: Sequence[float]) -> None:
         if not self._open:
@@ -275,6 +322,9 @@ class ListenToast(ctk.CTkToplevel):
                 outline="",
             )
 
+    def _paint_transcript(self) -> None:
+        paint_transcript(self.transcript, self._messages, self._pending_user, self._pending_reply)
+
     def _place(self) -> None:
         left, top, right, bottom = _work_area()
         if right <= left:
@@ -298,6 +348,24 @@ class ListenToast(ctk.CTkToplevel):
             _style_native(_hwnd(self), dark=theming.current().appearance != "light")
         except Exception:
             pass
+
+    def _sync_pin_button(self) -> None:
+        theme = theming.current()
+        if self._pinned:
+            self.pin_btn.configure(
+                text="📌",
+                text_color=theme.accent,
+                fg_color=theme.surface_alt,
+                hover_color=theme.surface_alt,
+            )
+        else:
+            style = theme.button("surface_off")
+            style["text_color"] = theme.text_muted
+            self.pin_btn.configure(text="📍", **style)
+
+    def _toggle_pin(self) -> None:
+        self._pinned = not self._pinned
+        self._sync_pin_button()
 
     def _clicked(self, _event=None) -> None:  # noqa: ANN001
         if self.on_click:

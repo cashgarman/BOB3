@@ -4,7 +4,7 @@ from bob.audio import WAVE_BARS
 from bob.state import State
 from bob.ui import theme as theming
 from bob.ui.listen_toast import ListenToast
-from tests.helpers import pump
+from tests.helpers import pump, transcript_text
 
 
 def test_toast_present_hide_and_click(ui):
@@ -69,4 +69,47 @@ def test_toast_apply_theme(ui):
     toast.apply_theme(forest)
     pump(ui)
     assert toast.status.cget("text_color") == forest.speaking
+    toast.destroy()
+
+
+def test_toast_transcript(ui):
+    toast = ListenToast(ui)
+    pump(ui, 3)
+    toast.set_transcript(
+        [{"role": "user", "content": "Hello"}],
+        pending_reply="Hi there",
+    )
+    pump(ui)
+    text = transcript_text(toast.transcript)
+    assert "You: Hello" in text
+    assert "Bob: Hi there" in text
+    toast.destroy()
+
+
+def test_toast_pin_prevents_hide(ui):
+    toast = ListenToast(ui)
+    pump(ui, 3)
+    toast.present()
+    pump(ui)
+    toast._toggle_pin()
+    assert toast.is_pinned() is True
+
+    toast.hide()
+    pump(ui)
+    assert toast.is_open() is True
+
+    toast.hide(force=True)
+    pump(ui)
+    assert toast.is_open() is False
+    toast.destroy()
+
+
+def test_toast_pin_button_does_not_toggle_listen(ui):
+    clicks = []
+    toast = ListenToast(ui, on_click=lambda: clicks.append(1))
+    pump(ui, 3)
+    toast.pin_btn.invoke()
+    pump(ui)
+    assert toast.is_pinned() is True
+    assert clicks == []
     toast.destroy()

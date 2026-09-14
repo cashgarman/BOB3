@@ -5,6 +5,7 @@ from collections.abc import Callable
 import customtkinter as ctk
 
 from bob.hotkeys import HotkeyRecorder
+from bob.prompts import load_system_prompt
 from bob.settings import Settings
 from bob.ui import theme as theming
 from bob.ui.theme import PRESET_KEYS, Theme, key_for_label, labels_for, preset, set_role
@@ -123,7 +124,7 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(frame, text="System prompt", anchor="w", **theme.label_style()).pack(fill="x", pady=(10, 2))
         self.prompt = ctk.CTkTextbox(frame, height=120, **theme.textbox())
         self.prompt.pack(fill="x")
-        self.prompt.insert("1.0", settings.system_prompt)
+        self.prompt.insert("1.0", load_system_prompt())
 
         self.error = set_role(
             ctk.CTkLabel(self, text="", text_color=theme.error, wraplength=520, justify="left"),
