@@ -29,8 +29,29 @@ def test_settings_dialog_loads_current_values(ui):
     assert dialog.vars["llm_model"].get() == "qwen2.5:latest"
     assert dialog.vars["hotkey"].get() == "ctrl+shift+space"
     assert dialog.vars["tts_speed"].get() == "1.2"
+    assert dialog.vars["llm_num_ctx"].get() == str(settings.llm_num_ctx)
     assert "Bob" in dialog.prompt.get("1.0", "end")
     assert find_widget(dialog, ctk.CTkButton, text="Customize theme…")
+    assert find_widget(dialog, ctk.CTkButton, text="Preview")
+    dialog.destroy()
+
+
+def test_settings_dialog_voice_preview_callback(ui):
+    previews = []
+    dialog = SettingsDialog(
+        ui,
+        Settings(),
+        on_save=lambda _v: None,
+        llm_models=["qwen2.5:latest"],
+        inputs=[],
+        outputs=[],
+        on_preview_voice=lambda voice, speed: previews.append((voice, speed)),
+    )
+    pump(ui)
+    dialog.vars["tts_voice"].set("af_bella")
+    dialog.vars["tts_speed"].set("1.1")
+    find_widget(dialog, ctk.CTkButton, text="Preview").invoke()
+    assert previews == [("af_bella", 1.1)]
     dialog.destroy()
 
 

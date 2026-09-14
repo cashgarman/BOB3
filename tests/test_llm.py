@@ -220,3 +220,48 @@ def test_chat_keeps_partial_history_on_close():
     assert chat.history[-2]["content"] == "Weather?"
     assert chat.history[-1]["role"] == "assistant"
     assert chat.history[-1]["content"] == "Partial answer"
+
+
+def test_chat_falls_back_when_model_rejects_tools():
+    chat = OllamaChat("http://127.0.0.1:11434", "dolphin3:latest", 4096, "You are Bob.", 12)
+    tools = [{"type": "function", "function": {"name": "clock_now", "parameters": {}}}]
+    calls = {"n": 0}
+
+    class FakeStream:
+        is_error = False
+
+        def read(self):
+            return b""
+
+        def iter_lines(self):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                yield json.dumps(
+                    {"error": "registry.ollama.ai/library/dolphin3:latest does not support tools"}
+                )
+                return
+            yield json.dumps({"message": {"content": "I am not censored."}, "done": True})
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class FakeClient:
+        def stream(self, *args, **kwargs):
+            return FakeStream()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    with patch("bob.llm.httpx.Client", return_value=FakeClient()):
+        chunks = list(chat.chat("Are you censored?", tools=tools, on_tool=lambda *_: "ok"))
+        chunks2 = list(chat.chat("Thanks", tools=tools, on_tool=lambda *_: "ok"))
+    assert chunks == ["I am not censored."]
+    assert chat._tools_unsupported is True
+    assert chunks2 == ["I am not censored."]
+    assert calls["n"] == 3

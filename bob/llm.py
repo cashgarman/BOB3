@@ -50,6 +50,11 @@ def _deferral_tool_name(preamble: str, user_text: str) -> str | None:
     return None
 
 
+def _is_tools_unsupported_error(message: str) -> bool:
+    lower = (message or "").lower()
+    return "does not support tools" in lower
+
+
 def _ollama_error(exc: Exception, model: str) -> str:
     """Turn httpx/Ollama failures into something a user can act on."""
     if isinstance(exc, httpx.HTTPStatusError):
@@ -118,6 +123,10 @@ class OllamaChat:
         self.last_eval_count: int | None = None
         self.last_eval_ms: float | None = None
         self.last_ttft_ms: float | None = None
+        self._tools_unsupported = False
+
+    def reset_tools_support(self) -> None:
+        self._tools_unsupported = False
 
     def ping(self) -> None:
         with httpx.Client(timeout=5.0) as client:
@@ -168,6 +177,17 @@ class OllamaChat:
         return "\n\n".join(parts)
 
     def preload(self, tools: list[dict[str, Any]] | None = None) -> None:
+        try:
+            self._preload_request(tools)
+        except RuntimeError as exc:
+            if tools and _is_tools_unsupported_error(str(exc)):
+                self._tools_unsupported = True
+                log.warning("Model %s does not support tools; preload without tools", self.model)
+                self._preload_request(None)
+            else:
+                raise
+
+    def _preload_request(self, tools: list[dict[str, Any]] | None = None) -> None:
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [{"role": "system", "content": self._system(with_tools=bool(tools))}],
@@ -223,6 +243,9 @@ class OllamaChat:
     ) -> Iterator[str]:
         """Stream a spoken reply, running any tool the model asks for first."""
         spoken_user = user_text
+        if self._tools_unsupported:
+            tools = None
+            on_tool = None
         self.history.append({"role": "user", "content": self._user_with_context(user_text, memory_block)})
         self._trim()
         agentic = bool(tools) and on_tool is not None
@@ -244,6 +267,17 @@ class OllamaChat:
                     if partial and not self._history_ends_with_assistant(partial):
                         self.history.append({"role": "assistant", "content": partial})
                     raise
+                except RuntimeError as exc:
+                    if offered and _is_tools_unsupported_error(str(exc)):
+                        self._tools_unsupported = True
+                        log.warning(
+                            "Model %s does not support tools; continuing without tools",
+                            self.model,
+                        )
+                        system = self._system(with_tools=False)
+                        content, calls = yield from self._round(system, None, cancel, spoken)
+                    else:
+                        raise
                 if not calls and offered and _is_tool_preamble(content) and on_tool:
                     hinted = _deferral_tool_name(content, spoken_user)
                     if hinted:

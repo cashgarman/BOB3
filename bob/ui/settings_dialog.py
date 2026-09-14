@@ -18,6 +18,7 @@ STT_MODELS = (
     "small",
 )
 COMPUTE = ("int8_float16", "int8", "float16")
+CONTEXT_LENGTHS = ("2048", "4096", "8192", "16384", "32768")
 WAKE_WORDS = ("hey_jarvis", "hey_mycroft", "alexa", "hey_rhasspy")
 VOICES = (
     "af_heart",
@@ -31,6 +32,7 @@ VOICES = (
     "bm_george",
     "bm_lewis",
 )
+TTS_PREVIEW_TEXT = "Hello, how are you doing today?"
 
 
 class SettingsDialog(ctk.CTkToplevel):
@@ -44,6 +46,7 @@ class SettingsDialog(ctk.CTkToplevel):
         outputs: list[str],
         on_recording: Callable[[bool], None] | None = None,
         on_hotkey_changed: Callable[[str], None] | None = None,
+        on_preview_voice: Callable[[str, float], None] | None = None,
         on_open_theme: Callable[[], None] | None = None,
         on_close: Callable[[], None] | None = None,
     ) -> None:
@@ -60,6 +63,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_save = on_save
         self.on_recording = on_recording
         self.on_hotkey_changed = on_hotkey_changed
+        self.on_preview_voice = on_preview_voice
         self.on_open_theme = on_open_theme
         self.on_close = on_close
         self.vars: dict[str, ctk.StringVar | ctk.BooleanVar] = {}
@@ -83,8 +87,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self._combo(frame, "LLM model", "llm_model", llm_models or [settings.llm_model])
         self._combo(frame, "STT model", "stt_model", list(STT_MODELS))
         self._combo(frame, "STT compute", "stt_compute_type", list(COMPUTE))
-        self._entry(frame, "Context tokens", "llm_num_ctx")
-        self._combo(frame, "TTS voice", "tts_voice", list(VOICES))
+        self._combo(frame, "Context tokens", "llm_num_ctx", list(CONTEXT_LENGTHS))
+        self._voice_picker(frame)
         self._entry(frame, "TTS speed (0.5–2.0)", "tts_speed")
         self._combo(frame, "Default speech mood", "tts_mood", list(MOODS))
         self._combo(frame, "Wake word", "wake_word", list(WAKE_WORDS))
@@ -229,7 +233,51 @@ class SettingsDialog(ctk.CTkToplevel):
             values = [current, *values]
         var = ctk.StringVar(value=current)
         self.vars[key] = var
-        ctk.CTkComboBox(parent, values=values or [""], variable=var, **theme.combo()).pack(fill="x")
+        ctk.CTkComboBox(
+            parent,
+            values=values or [""],
+            variable=var,
+            state="readonly",
+            **theme.combo(),
+        ).pack(fill="x")
+
+    def _voice_picker(self, parent) -> None:
+        theme = theming.current()
+        ctk.CTkLabel(parent, text="TTS voice", anchor="w", **theme.label_style()).pack(fill="x", pady=(8, 2))
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x")
+        current = str(self.settings.tts_voice or "")
+        values = list(VOICES)
+        if current and current not in values:
+            values = [current, *values]
+        var = ctk.StringVar(value=current)
+        self.vars["tts_voice"] = var
+        ctk.CTkComboBox(row, values=values, variable=var, state="readonly", **theme.combo()).pack(
+            side="left", fill="x", expand=True
+        )
+        set_role(
+            ctk.CTkButton(
+                row,
+                text="Preview",
+                width=88,
+                command=self._preview_voice,
+                **theme.button("surface"),
+            ),
+            "surface",
+        ).pack(side="right", padx=(8, 0))
+        self._hint(parent, f'Preview plays: "{TTS_PREVIEW_TEXT}"')
+
+    def _preview_voice(self) -> None:
+        if not self.on_preview_voice:
+            return
+        voice = str(self.vars["tts_voice"].get()).strip()
+        if not voice:
+            return
+        try:
+            speed = float(str(self.vars["tts_speed"].get()).strip() or "1.0")
+        except ValueError:
+            speed = 1.0
+        self.on_preview_voice(voice, speed)
 
     def _hint(self, parent, text: str) -> None:
         theme = theming.current()

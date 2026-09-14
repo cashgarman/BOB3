@@ -380,6 +380,8 @@ class Assistant:
         if "theme" in values or "theme_overrides" in values:
             self.apply_theme(theming.resolve_theme(self.settings))
         self.llm.host = self.settings.ollama_host.rstrip("/")
+        if str(values.get("llm_model", self.llm.model)) != self.llm.model:
+            self.llm.reset_tools_support()
         self.llm.model = self.settings.llm_model
         self.llm.num_ctx = self.settings.llm_num_ctx
         self.llm.system_prompt = self.settings.system_prompt
@@ -415,6 +417,7 @@ class Assistant:
     def _apply_live(self, field: str, value) -> None:
         if field == "llm_model":
             self.llm.model = value
+            self.llm.reset_tools_support()
             threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
         elif field == "llm_num_ctx":
             self.llm.num_ctx = int(value)
@@ -516,11 +519,35 @@ class Assistant:
                 list_devices("output"),
                 on_recording=self._set_hotkey_recording,
                 on_hotkey_changed=lambda spec: self.apply_setting("hotkey", spec),
+                on_preview_voice=self._preview_tts_voice,
                 on_open_theme=self.open_theme,
                 on_close=lambda: setattr(self, "_settings_win", None),
             )
 
         self._ui(show)
+
+    def _preview_tts_voice(self, voice: str, speed: float) -> None:
+        from bob.tts import clamp_speed
+        from bob.ui.settings_dialog import TTS_PREVIEW_TEXT
+
+        def work() -> None:
+            try:
+                self.tts.voice = voice
+                self.tts.speed = clamp_speed(speed)
+                samples, sr = self.tts.synthesize(TTS_PREVIEW_TEXT)
+                if samples.size:
+                    self.audio.play(samples, sr)
+            except Exception as exc:
+                log.warning("Voice preview failed: %s", exc)
+                if self.overlay:
+
+                    def notify() -> None:
+                        if self.overlay:
+                            self.overlay.set_reply(f"Voice preview failed: {exc}")
+
+                    self._ui(notify)
+
+        threading.Thread(target=work, name="voice-preview", daemon=True).start()
 
     def open_theme(self) -> None:
         def show():
