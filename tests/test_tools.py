@@ -52,6 +52,8 @@ def test_tool_registry_load_builtins_and_invoke(tmp_path: Path):
     names = reg.load()
     assert "get_current_time" in names
     assert "conversation_log" in names
+    assert "web_search" in names
+    assert "summarize_for_speech" in names
     assert "notes_read" in names
     assert "set_speech_mood" in names
     assert "memory_search" in names
@@ -139,3 +141,40 @@ def test_tool_context_set_mood():
     assert seen == ["calm"]
     with pytest.raises(ToolError):
         ctx.set_mood("not-real")
+
+
+def test_web_search_tool(tmp_path: Path):
+    reg = ToolRegistry(tmp_path)
+    reg.load()
+    ctx = reg.context()
+
+    sample = [
+        {
+            "title": "Example Result",
+            "body": "A helpful snippet about the topic.",
+            "href": "https://example.com/article",
+        }
+    ]
+
+    with patch("bob.tools.builtin.search.DDGS") as mock_ddgs:
+        mock_ddgs.return_value.text.return_value = sample
+        out = reg.invoke("web_search", {"query": "python tutorials", "limit": 3}, ctx=ctx)
+    assert "Example Result" in out
+    assert "helpful snippet" in out
+    assert "https://example.com/article" in out
+    mock_ddgs.return_value.text.assert_called_once_with("python tutorials", max_results=3)
+
+    with patch("bob.tools.builtin.search.DDGS") as mock_ddgs:
+        mock_ddgs.return_value.text.return_value = []
+        empty = reg.invoke("web_search", {"query": "nothing here"}, ctx=ctx)
+    assert "No results found" in empty
+
+    err = reg.invoke("web_search", {"query": "   "}, ctx=ctx)
+    assert "Error" in err
+
+    with patch("bob.tools.builtin.search.DDGS") as mock_ddgs:
+        mock_ddgs.return_value.text.side_effect = RuntimeError("network down")
+        failed = reg.invoke("web_search", {"query": "weather today"}, ctx=ctx)
+    assert "Error" in failed
+    assert "network down" in failed
+    reg.close()

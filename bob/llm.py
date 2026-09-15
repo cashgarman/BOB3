@@ -47,6 +47,7 @@ _TIME_TOOL_RE = re.compile(
 # Voice replies should stay short; qwen3 tool rounds often ramble when thinking leaks.
 _CHAT_NUM_PREDICT = 256
 _THINKING_CHAT_NUM_PREDICT = 128
+_THINKING_FINAL_NUM_PREDICT = 512
 _TOOL_ROUND_MONOLOGUE_CHARS = 520
 _SPOKEN_REPLY_MAX_CHARS = 420
 _NO_THINK_RE = re.compile(r"\s*/no_think\b", re.IGNORECASE)
@@ -84,14 +85,10 @@ def needs_agentic_tools(user_text: str) -> bool:
     """Only run tool-selection rounds when the user likely needs a tool."""
     if needs_current_time(user_text) or needs_conversation_log(user_text):
         return True
+    if _needs_web_search(user_text) or needs_chat_context(user_text):
+        return True
     t = (user_text or "").lower()
     keys = (
-        "search",
-        "look up",
-        "lookup",
-        "web",
-        "online",
-        "news",
         "weather",
         "note",
         "remember that",
@@ -103,6 +100,57 @@ def needs_agentic_tools(user_text: str) -> bool:
         "save this",
     )
     return any(k in t for k in keys)
+
+
+def needs_chat_context(user_text: str) -> bool:
+    """Follow-ups that refer to earlier turns in this chat."""
+    t = (user_text or "").lower()
+    keys = (
+        "rephrase",
+        "say that again",
+        "say it again",
+        "bullet point",
+        "bullets",
+        "didn't get",
+        "didnt get",
+        "don't get",
+        "dont get",
+        "what do you mean",
+        "summarize that",
+        "that again",
+        "you just said",
+        "your last",
+        "previous answer",
+        "as opposed to",
+        "instead of",
+        "can you repeat",
+        "repeat that",
+        "didn't receive",
+        "didnt receive",
+        "specific question yet",
+    )
+    return any(k in t for k in keys)
+
+
+def _user_wants_bullets(question: str) -> bool:
+    t = (question or "").lower()
+    return any(k in t for k in ("bullet", "bullets", "as a list", "list format"))
+
+
+def _looks_like_bullet_list(text: str) -> bool:
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    marked = sum(
+        1
+        for line in lines
+        if line.startswith(("-", "•", "*")) or re.match(r"^\d+[.)]\s", line)
+    )
+    return marked >= 2
+
+
+def _spoken_max_chars(question: str) -> int:
+    return 900 if _user_wants_bullets(question) else _SPOKEN_REPLY_MAX_CHARS
 
 
 def needs_current_time(user_text: str) -> bool:
@@ -185,9 +233,13 @@ def _looks_like_spoken_answer(text: str, question: str = "") -> bool:
         return True
     if _is_internal_monologue(t):
         return False
-    if t[-1] in ".!?" and len(t) <= _SPOKEN_REPLY_MAX_CHARS:
+    max_chars = _spoken_max_chars(question)
+    if _user_wants_bullets(question) and _looks_like_bullet_list(t) and len(t) <= max_chars:
+        return True
+    if t[-1] in ".!?" and len(t) <= max_chars:
         return bool(re.findall(r"[a-z0-9']+", t.lower()))
-    return False
+    words = re.findall(r"[a-z0-9']+", t.lower())
+    return len(t) <= max_chars and len(words) >= 2 and not t.endswith(",")
 
 
 def _looks_complete_answer(text: str) -> bool:
@@ -340,8 +392,9 @@ def _pick_spoken_answer(raw: str, question: str) -> str:
     text = _strip_control_tokens(_strip_think_blocks(raw or "")).strip()
     if not text:
         return ""
+    max_chars = _spoken_max_chars(question)
     if (
-        len(text) <= _SPOKEN_REPLY_MAX_CHARS
+        len(text) <= max_chars
         and not _is_internal_monologue(text)
         and _looks_like_spoken_answer(text, question)
     ):
@@ -464,11 +517,157 @@ class _ThinkGate:
         return _strip_think_blocks(self.raw)
 
 
+def _needs_web_search(user_text: str) -> bool:
+    t = (user_text or "").lower()
+    keys = (
+        "search",
+        "look up",
+        "lookup",
+        "web",
+        "online",
+        "news",
+        "headline",
+        "latest",
+        "current events",
+    )
+    return any(k in t for k in keys)
+
+
+def _fresh_web_search(user_text: str) -> bool:
+    """True when the user is asking for a new lookup, not reformatting prior results."""
+    if not _needs_web_search(user_text):
+        return False
+    if not needs_chat_context(user_text):
+        return True
+    t = (user_text or "").lower()
+    fresh_keys = (
+        "search",
+        "look up",
+        "lookup",
+        "search online",
+        "look online",
+        "find online",
+        "latest",
+        "current",
+        "right now",
+        "today",
+    )
+    return any(k in t for k in fresh_keys)
+
+
+def _web_search_query(user_text: str) -> str:
+    text = (user_text or "").strip()
+    lower = text.lower()
+    for prefix in ("can you ", "could you ", "please ", "would you ", "will you "):
+        if lower.startswith(prefix):
+            text = text[len(prefix) :].strip()
+            lower = text.lower()
+    for verb in (
+        "look up ",
+        "search the web for ",
+        "search online for ",
+        "search for ",
+        "find ",
+        "check ",
+    ):
+        if lower.startswith(verb):
+            text = text[len(verb) :].strip()
+            break
+    return text.strip().rstrip("?.!")
+
+
 def _deferral_tool_name(preamble: str, user_text: str) -> str | None:
     p = (preamble or "").lower()
     if "conversation" in p or needs_conversation_log(user_text):
         return "conversation_log"
+    if needs_chat_context(user_text) and not _fresh_web_search(user_text):
+        return "conversation_log"
+    if _fresh_web_search(user_text):
+        return "web_search"
     return None
+
+
+def _deferral_tool_args(tool_name: str, user_text: str) -> dict[str, Any]:
+    if tool_name == "conversation_log":
+        return {"limit": 40}
+    if tool_name == "web_search":
+        return {"query": _web_search_query(user_text) or user_text}
+    return {}
+
+
+def _invoke_web_search(on_tool: Callable[[str, Any], str], user_text: str) -> str:
+    try:
+        return on_tool("web_search", _deferral_tool_args("web_search", user_text))
+    except Exception as exc:
+        return f"Error: tool 'web_search' failed: {exc}"
+
+
+def _invoke_conversation_log(on_tool: Callable[[str, Any], str], limit: int = 20) -> str:
+    try:
+        return on_tool("conversation_log", {"limit": limit})
+    except Exception as exc:
+        return f"Error: tool 'conversation_log' failed: {exc}"
+
+
+def _invoke_summarize(
+    on_tool: Callable[[str, Any], str],
+    text: str,
+    question: str,
+    *,
+    bullets: bool = False,
+) -> str:
+    style = "bullets" if bullets else "brief"
+    try:
+        return on_tool(
+            "summarize_for_speech",
+            {"text": text, "question": question, "style": style},
+        )
+    except Exception as exc:
+        return f"Error: tool 'summarize_for_speech' failed: {exc}"
+
+
+def _spoken_from_tool_text(text: str, question: str, history: list[dict[str, Any]] | None = None) -> str:
+    """Extract a clean spoken answer from a tool result, or "" if none is safe.
+
+    Never falls back to raw/truncated text: speaking partial internal
+    monologue is worse than saying nothing and letting the caller retry.
+    """
+    raw = (text or "").strip()
+    if not raw or raw.startswith("Error"):
+        return ""
+    picked = _pick_spoken_answer(raw, question)
+    if picked:
+        return picked
+    cleaned = _sanitize_spoken_reply(raw, history, question)
+    if cleaned and _looks_like_spoken_answer(cleaned, question):
+        return cleaned
+    if _looks_like_spoken_answer(raw, question):
+        return raw
+    return ""
+
+
+def _fallback_headlines_from_search(search_text: str, limit: int = 3) -> str:
+    """Best-effort deterministic summary when the LLM summarizer fails outright."""
+    titles: list[str] = []
+    for line in (search_text or "").splitlines():
+        line = line.strip()
+        match = re.match(r"^\d+\.\s*(.+)", line)
+        if not match:
+            continue
+        rest = match.group(1)
+        # Drop the trailing " — snippet (url)" tail, keep just the title.
+        title = re.split(r"\s+—\s+|\s+\(https?://", rest)[0].strip()
+        if title:
+            titles.append(title)
+        if len(titles) >= limit:
+            break
+    if not titles:
+        return ""
+    if len(titles) == 1:
+        return f"Here's what I found: {titles[0]}."
+    if len(titles) == 2:
+        return f"Here's what I found: {titles[0]}, and {titles[1]}."
+    return "Here's what I found: " + ", ".join(titles[:-1]) + f", and {titles[-1]}."
 
 
 def _is_tools_unsupported_error(message: str) -> bool:
@@ -616,12 +815,44 @@ class OllamaChat:
             )
         return "\n\n".join(p for p in parts if p)
 
-    def _answer_messages(self, question: str) -> list[dict[str, str]]:
+    def _history_for_answer(self, question: str) -> list[dict[str, str]]:
+        """Recent user/assistant turns for follow-up questions."""
+        prior: list[dict[str, str]] = []
+        for msg in self.history:
+            role = msg.get("role")
+            if role == "user":
+                content = str(msg.get("content") or "").strip()
+                if content:
+                    prior.append({"role": "user", "content": content})
+            elif role == "assistant":
+                content = str(msg.get("content") or "").strip()
+                if content:
+                    prior.append({"role": "assistant", "content": content})
+        if prior and prior[-1]["role"] == "user" and prior[-1]["content"].strip() == question.strip():
+            prior = prior[:-1]
+        max_msgs = max(2, self.max_turns * 2)
+        return prior[-max_msgs:]
+
+    def _answer_messages(
+        self,
+        question: str,
+        memory_block: str = "",
+        history: list[dict[str, str]] | None = None,
+    ) -> list[dict[str, str]]:
         question = (question or "").strip()
-        return [
-            {"role": "system", "content": load_answer_prompt()},
-            {"role": "user", "content": question},
-        ]
+        system = load_answer_prompt()
+        if _user_wants_bullets(question):
+            system += " Use short bullet points when the user asked for bullets."
+        if (memory_block or "").strip():
+            system += (
+                "\n\nBackground (for your use only — never read aloud):\n\n"
+                + memory_block.strip()
+            )
+        messages: list[dict[str, str]] = [{"role": "system", "content": system}]
+        if history:
+            messages.extend(history)
+        messages.append({"role": "user", "content": question})
+        return messages
 
     def preload(self, tools: list[dict[str, Any]] | None = None) -> None:
         try:
@@ -707,16 +938,69 @@ class OllamaChat:
         )
         return content
 
-    def _generate_spoken_answer(self, question: str) -> str:
+    def _answer_from_web_search(
+        self,
+        spoken_user: str,
+        on_tool: Callable[[str, Any], str],
+        on_thought: Callable[[str], None] | None = None,
+    ) -> str:
+        search = _invoke_web_search(on_tool, spoken_user)
+        if not search.strip() or search.startswith("Error"):
+            return ""
+        summary = _invoke_summarize(
+            on_tool,
+            search,
+            spoken_user,
+            bullets=_user_wants_bullets(spoken_user),
+        )
+        self.history.append({"role": "tool", "tool_name": "web_search", "content": search})
+        reply = ""
+        if summary.strip() and not summary.startswith("Error"):
+            self.history.append({"role": "tool", "tool_name": "summarize_for_speech", "content": summary})
+            reply = _spoken_from_tool_text(summary, spoken_user, self.history)
+        if not reply:
+            # The summarizer either errored or kept narrating; fall back to a
+            # deterministic answer built straight from the search titles
+            # rather than risk speaking leftover monologue.
+            reply = _fallback_headlines_from_search(search)
+        if reply:
+            self._append_internal_thought(
+                "Searched the web and summarized the results for speech.",
+                on_thought,
+            )
+            self.history.append({"role": "assistant", "content": reply})
+        return reply
+
+    def _generate_spoken_answer(
+        self,
+        question: str,
+        memory_block: str = "",
+        on_tool: Callable[[str, Any], str] | None = None,
+    ) -> str:
         question = (question or "").strip()
         if not question:
             return "Sorry, I didn't catch that."
-        messages = self._answer_messages(question)
+        if on_tool and (memory_block or "").strip():
+            summary = _invoke_summarize(
+                on_tool,
+                memory_block,
+                question,
+                bullets=_user_wants_bullets(question),
+            )
+            if summary.strip() and not summary.startswith("Error"):
+                reply = _spoken_from_tool_text(summary, question, self.history)
+                if reply:
+                    return reply
+        messages = self._answer_messages(
+            question,
+            memory_block=memory_block,
+            history=self._history_for_answer(question),
+        )
         use_think = self._thinks()
         for attempt in range(2):
             predict = 160
             if use_think:
-                predict = 1024 if attempt == 0 else 1536
+                predict = 512 if attempt == 0 else 768
             try:
                 content, _thinking, _meta = self._post_chat(
                     messages,
@@ -731,18 +1015,29 @@ class OllamaChat:
             picked = _pick_spoken_answer(raw, question)
             if picked:
                 return picked
-            if raw:
-                break
+            if raw and not _is_internal_monologue(raw):
+                line = _extract_last_short_line(raw)
+                if line and _looks_like_spoken_answer(line, question):
+                    return line
         return "Sorry, I didn't get that."
 
-    def _recover_reply(self, spoken_user: str) -> str:
+    def _recover_reply(
+        self,
+        spoken_user: str,
+        memory_block: str = "",
+        on_tool: Callable[[str, Any], str] | None = None,
+    ) -> str:
         question = (spoken_user or "").strip() or _spoken_question(self.history, spoken_user)
         if not question:
             return "Sorry, I didn't catch that."
         direct = _try_direct_answer(question)
         if direct:
             return direct
-        return self._generate_spoken_answer(question)
+        if _fresh_web_search(question) and on_tool:
+            reply = self._answer_from_web_search(question, on_tool)
+            if reply:
+                return reply
+        return self._generate_spoken_answer(question, memory_block=memory_block, on_tool=on_tool)
 
     def chat(
         self,
@@ -779,6 +1074,11 @@ class OllamaChat:
                 self.history.append({"role": "assistant", "content": reply})
                 yield reply
                 return
+        if _fresh_web_search(spoken_user) and on_tool:
+            reply = self._answer_from_web_search(spoken_user, on_tool, on_thought)
+            if reply:
+                yield reply
+                return
         direct = _try_direct_answer(spoken_user)
         if direct:
             self._append_internal_thought("Answered directly.", on_thought)
@@ -786,12 +1086,13 @@ class OllamaChat:
             yield direct
             return
         if self._thinks() and not agentic:
-            reply = self._generate_spoken_answer(spoken_user)
+            reply = self._generate_spoken_answer(spoken_user, memory_block=memory_block, on_tool=on_tool)
             self._append_internal_thought("Answered with a direct generation pass.", on_thought)
             self.history.append({"role": "assistant", "content": reply})
             yield reply
             return
         force_final = False
+        streamed_to_user = False
         for index in range(tool_rounds + 1):
                 if cancel is not None and cancel.is_set():
                     return
@@ -799,10 +1100,14 @@ class OllamaChat:
                 offered = None if force_final or index >= tool_rounds else tools
                 system = self._system(with_tools=bool(offered), memory_block=memory_block)
                 spoken: list[str] = []
+                round_tools = offered
+                spoken_before = 0
                 try:
                     content, calls = yield from self._round(
-                        system, offered, cancel, spoken, spoken_user, on_thought
+                        system, round_tools, cancel, spoken, spoken_user, on_thought
                     )
+                    if len(spoken) > spoken_before:
+                        streamed_to_user = True
                 except GeneratorExit:
                     # Caller stopped consuming (barge-in / hotkey). Keep what was
                     # already said so the next turn knows what Bob got through.
@@ -818,16 +1123,19 @@ class OllamaChat:
                             self.model,
                         )
                         system = self._system(with_tools=False, memory_block=memory_block)
+                        round_tools = None
                         content, calls = yield from self._round(
-                            system, None, cancel, spoken, spoken_user, on_thought
+                            system, round_tools, cancel, spoken, spoken_user, on_thought
                         )
                     else:
                         raise
-                if not calls and offered and _is_tool_preamble(content) and on_tool:
+                if not calls and offered and on_tool and (
+                    _is_tool_preamble(content) or _is_internal_monologue(content)
+                ):
                     hinted = _deferral_tool_name(content, spoken_user)
                     if hinted:
                         try:
-                            args = {"limit": 40} if hinted == "conversation_log" else {}
+                            args = _deferral_tool_args(hinted, spoken_user)
                             result = on_tool(hinted, args)
                         except Exception as exc:
                             result = f"Error: tool '{hinted}' failed: {exc}"
@@ -845,6 +1153,14 @@ class OllamaChat:
                                 result = f"Error: tool 'get_current_time' failed: {exc}"
                             self.history.append({"role": "tool", "tool_name": "get_current_time", "content": result})
                             continue
+                        if needs_chat_context(spoken_user) and not _fresh_web_search(spoken_user) and on_tool:
+                            result = _invoke_conversation_log(on_tool)
+                            self.history.append({"role": "tool", "tool_name": "conversation_log", "content": result})
+                            continue
+                        if _fresh_web_search(spoken_user) and on_tool:
+                            result = _invoke_web_search(on_tool, spoken_user)
+                            self.history.append({"role": "tool", "tool_name": "web_search", "content": result})
+                            continue
                         continue
                 if not calls and offered and content.strip() and _is_internal_monologue(content):
                     log.warning(
@@ -858,6 +1174,14 @@ class OllamaChat:
                         except Exception as exc:
                             result = f"Error: tool 'get_current_time' failed: {exc}"
                         self.history.append({"role": "tool", "tool_name": "get_current_time", "content": result})
+                        continue
+                    if needs_chat_context(spoken_user) and not _fresh_web_search(spoken_user) and on_tool:
+                        result = _invoke_conversation_log(on_tool)
+                        self.history.append({"role": "tool", "tool_name": "conversation_log", "content": result})
+                        continue
+                    if _fresh_web_search(spoken_user) and on_tool:
+                        result = _invoke_web_search(on_tool, spoken_user)
+                        self.history.append({"role": "tool", "tool_name": "web_search", "content": result})
                         continue
                     direct = _try_direct_answer(spoken_user)
                     if direct:
@@ -876,7 +1200,12 @@ class OllamaChat:
                     continue
                 if not calls and content.strip():
                     content = _finalize_spoken_reply(content, self.history, spoken_user)
-                if not calls and (not content.strip() or _is_useless_reply(content, spoken_user) or not _looks_like_spoken_answer(content, spoken_user)):
+                spoken_ok = bool(
+                    content.strip()
+                    and not _is_useless_reply(content, spoken_user)
+                    and _looks_like_spoken_answer(content, spoken_user)
+                )
+                if not calls and not spoken_ok:
                     if needs_current_time(spoken_user) and on_tool:
                         try:
                             result = on_tool("get_current_time", {})
@@ -887,13 +1216,20 @@ class OllamaChat:
                     elif offered:
                         continue
                     else:
-                        content = self._recover_reply(spoken_user)
+                        content = self._recover_reply(
+                            spoken_user,
+                            memory_block=memory_block,
+                            on_tool=on_tool,
+                        )
                         self._append_internal_thought(
                             "Initial model reply was unusable; regenerated a short answer.",
                             on_thought,
                         )
-                    if content.strip():
+                    if content.strip() and not streamed_to_user:
                         yield content
+                elif not calls and spoken_ok and round_tools:
+                    yield content
+                    streamed_to_user = True
                 if content.strip() or calls:
                     message: dict[str, Any] = {"role": "assistant", "content": content}
                     if calls:
@@ -952,7 +1288,11 @@ class OllamaChat:
             "keep_alive": -1,
             "options": {
                 "num_ctx": self.num_ctx,
-                "num_predict": _THINKING_CHAT_NUM_PREDICT if self._thinks() else _CHAT_NUM_PREDICT,
+                "num_predict": (
+                    _THINKING_FINAL_NUM_PREDICT
+                    if self._thinks() and not tools
+                    else (_THINKING_CHAT_NUM_PREDICT if self._thinks() else _CHAT_NUM_PREDICT)
+                ),
                 "temperature": 0.4 if self._thinks() else 0.7,
             },
         }
@@ -1019,13 +1359,21 @@ class OllamaChat:
                 return raw_content, calls
             if first_token and leftover:
                 self.last_ttft_ms = (time.perf_counter() - t0) * 1000.0
-            if leftover and not _is_useless_reply(leftover, spoken_user):
+            if cancelled:
                 if spoken is not None:
                     spoken.append(leftover)
-                streamed = True
                 yield leftover
-        elif cancelled and leftover.strip() and spoken is not None and not streamed:
-            spoken.append(leftover)
+            elif leftover and not _is_useless_reply(leftover, spoken_user):
+                speakable = (
+                    not _is_internal_monologue(leftover)
+                    and not _looks_like_meta_reply(leftover)
+                    and _looks_like_spoken_answer(leftover, spoken_user)
+                )
+                if speakable:
+                    if spoken is not None:
+                        spoken.append(leftover)
+                    streamed = True
+                    yield leftover
         return content, calls
 
     def _trim(self) -> None:

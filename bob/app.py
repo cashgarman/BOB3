@@ -1281,17 +1281,34 @@ class Assistant:
                 ).start()
 
     def _prefetch_tool_context(self, user_text: str, memory_block: str) -> str:
-        from bob.llm import needs_conversation_log, needs_current_time
+        from bob.llm import (
+            needs_chat_context,
+            needs_conversation_log,
+            needs_current_time,
+            _user_wants_bullets,
+        )
 
         blocks: list[str] = []
         if self.settings.tools_enabled:
             ctx = self.tools.context(chat=self.chat, session_id=self._session_id)
-            if needs_conversation_log(user_text) and "conversation_log" in self.tools.names():
+            if (needs_conversation_log(user_text) or needs_chat_context(user_text)) and "conversation_log" in self.tools.names():
                 log_text = self.tools.invoke("conversation_log", {"limit": 40}, ctx=ctx)
                 blocks.append(f"Conversation log (for this chat):\n{log_text}")
             if needs_current_time(user_text) and "get_current_time" in self.tools.names():
                 now = self.tools.invoke("get_current_time", {}, ctx=ctx)
                 blocks.append(f"Current local time: {now}")
+            if needs_chat_context(user_text) and not needs_conversation_log(user_text):
+                if "summarize_for_speech" in self.tools.names() and "conversation_log" in self.tools.names():
+                    log_text = self.tools.invoke("conversation_log", {"limit": 20}, ctx=ctx)
+                    style = "bullets" if _user_wants_bullets(user_text) else "brief"
+                    summary = self.tools.invoke(
+                        "summarize_for_speech",
+                        {"text": log_text, "question": user_text, "style": style},
+                        ctx=ctx,
+                        timeout=float(self.settings.tool_timeout_sec),
+                    )
+                    if summary and not str(summary).startswith("Error"):
+                        blocks.append(f"Conversation summary:\n{summary}")
         if not blocks:
             return memory_block
         block = "\n\n".join(blocks)

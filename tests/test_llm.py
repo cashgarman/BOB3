@@ -365,6 +365,48 @@ def test_needs_agentic_tools():
     assert not needs_agentic_tools("What's the biggest country in the world?")
     assert needs_agentic_tools("What time is it now?")
     assert needs_agentic_tools("Search the web for pizza")
+    assert needs_agentic_tools(
+        "Can you look up the top headlines in BBC News at news.bbc.co.uk?"
+    )
+
+
+def test_web_search_helpers():
+    from bob.llm import (
+        _deferral_tool_args,
+        _deferral_tool_name,
+        _fresh_web_search,
+        _needs_web_search,
+        _web_search_query,
+        needs_agentic_tools,
+        needs_chat_context,
+    )
+
+    question = "Can you look up the top headlines in BBC News at news.bbc.co.uk?"
+    assert _needs_web_search(question)
+    assert needs_agentic_tools(question)
+    assert _fresh_web_search(question)
+    assert _web_search_query(question) == "the top headlines in BBC News at news.bbc.co.uk"
+    assert _deferral_tool_name("Okay, the user is asking me to look up headlines.", question) == "web_search"
+    assert _deferral_tool_args("web_search", question)["query"] == "the top headlines in BBC News at news.bbc.co.uk"
+
+    followup = "Can you rephrase that as bullet points?"
+    assert needs_chat_context(followup)
+    assert needs_agentic_tools(followup)
+    assert not _fresh_web_search(followup)
+    assert _deferral_tool_name("Okay, the user wants bullets.", followup) == "conversation_log"
+
+    headlines = "summarize the BBC headlines as bullet points."
+    assert needs_agentic_tools(headlines)
+    assert not _fresh_web_search(headlines)
+
+
+def test_answer_messages_include_memory_block():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    messages = chat._answer_messages(
+        "What are the BBC headlines?",
+        memory_block="Web search results for 'BBC headlines':\n1. Example headline",
+    )
+    assert "Web search results" in messages[0]["content"]
 
 
 def test_looks_like_spoken_answer_rejects_instruction_echo():
@@ -437,14 +479,46 @@ def test_pick_spoken_answer_rejects_planning_sentences():
     )
 
 
-def test_answer_messages_are_question_only():
+def test_answer_messages_include_prior_turns():
     chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
     chat.history.append({"role": "user", "content": "What's your favorite color?"})
-    chat.history.append({"role": "assistant", "content": "They've been strict about short spoken sentences before."})
+    chat.history.append({"role": "assistant", "content": "Blue is a calming choice."})
+    chat.history.append({"role": "user", "content": "Can you rephrase that as bullet points?"})
+    messages = chat._answer_messages(
+        "Can you rephrase that as bullet points?",
+        history=chat._history_for_answer("Can you rephrase that as bullet points?"),
+    )
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    assert messages[2]["role"] == "assistant"
+    assert messages[-1]["content"] == "Can you rephrase that as bullet points?"
+    assert "bullet" in messages[0]["content"].lower()
+
+
+def test_answer_messages_are_question_only():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
     messages = chat._answer_messages("What's the biggest country in the world?")
     assert [m["role"] for m in messages] == ["system", "user"]
     assert messages[-1]["content"] == "What's the biggest country in the world?"
     assert "/no_think" not in messages[-1]["content"]
+
+
+def test_bullet_answers_accepted():
+    from bob.llm import _looks_like_bullet_list, _looks_like_spoken_answer, _pick_spoken_answer
+
+    bullets = "- Pakistan PM motorcade attack\n- Ukraine snap election warning\n- Canada ice-shelf loss"
+    question = "summarize as bullet points"
+    assert _looks_like_bullet_list(bullets)
+    assert _looks_like_spoken_answer(bullets, question)
+    assert _pick_spoken_answer(bullets, question) == bullets
+
+
+def test_answer_messages_legacy():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    chat.history.append({"role": "user", "content": "What's your favorite color?"})
+    chat.history.append({"role": "assistant", "content": "They've been strict about short spoken sentences before."})
+    messages = chat._answer_messages("What's the biggest country in the world?")
+    assert messages[-1]["content"] == "What's the biggest country in the world?"
 
 
 def test_looks_complete_answer():
@@ -608,15 +682,26 @@ def test_chat_force_final_for_agentic_question():
         def __exit__(self, *args):
             return False
 
+    calls: list[tuple[str, dict]] = []
+
+    def on_tool(name, arguments):
+        calls.append((name, arguments))
+        if name == "web_search":
+            return "1. BBC headline example — summary (https://bbc.co.uk/news)"
+        if name == "summarize_for_speech":
+            return "Russia is the largest country by area."
+        return ""
+
     with patch("bob.llm.httpx.Client", return_value=FakeClient()):
         chunks = list(
             chat.chat(
                 "Search the web for the biggest country",
                 tools=tools,
-                on_tool=lambda *_: "unused",
+                on_tool=on_tool,
                 max_rounds=4,
             )
         )
+    assert [name for name, _ in calls] == ["web_search", "summarize_for_speech"]
     assert chunks == ["Russia is the largest country by area."]
 
 

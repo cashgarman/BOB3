@@ -111,3 +111,31 @@ Opens a web page in the user's default browser.
 | **Use when** | The user asks to open a specific website. |
 
 Only full HTTP(S) URLs are accepted; invalid addresses return an error message to the model.
+
+---
+
+## web_search
+
+Searches the web for current information using DuckDuckGo (no API key required).
+
+| | |
+|---|---|
+| **Module** | `bob/tools/builtin/search.py` |
+| **Arguments** | `query` (required), `limit` (optional, default 5, max 8) — how many results to return |
+| **Use when** | The user asks to search the web, look something up online, or needs live facts such as news, prices, sports scores, or current events. |
+
+Returns numbered results with title, snippet, and URL. The model should summarize these for a spoken answer rather than reading URLs aloud.
+
+---
+
+## summarize_for_speech
+
+Turns long text into a short answer meant to be spoken aloud.
+
+| | |
+|---|---|
+| **Module** | `bob/tools/builtin/summarize.py` |
+| **Arguments** | `text` (required), `question` (optional), `style` (optional: `brief` or `bullets`) |
+| **Use when** | Web search or other tools return more text than should be read aloud, or the user asks for a summary or bullet points. |
+
+Uses the local Ollama model with thinking disabled. Bob also calls this automatically after a fresh web search.

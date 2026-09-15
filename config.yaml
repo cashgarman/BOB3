@@ -2,14 +2,14 @@ llm_model: qwen3:4b
 stt_model: parakeet-tdt-0.6b-v3
 stt_compute_type: int8_float16
 llm_num_ctx: 4096
-tts_voice: af_nicole
+tts_voice: af_heart
 tts_speed: 1.0
 tts_mood: neutral
 wake_word: hey_jarvis
 wake_word_enabled: true
 wake_threshold: 0.5
 hotkey: ctrl+shift+alt+f5
-max_silence_sec: 0.7
+max_silence_sec: 0.2
 auto_endpoint: true
 endpoint_silence_ms: 700
 turn_detector: smart_turn
@@ -30,7 +30,7 @@ system_prompt: "You are BOB, a local voice assistant. Speak in two or three natu
   \ notes and memory are for your use only \u2014 never repeat, summarize, or mention\
   \ them unless the user explicitly asks."
 show_overlay: false
-start_with_windows: true
+start_with_windows: false
 input_device: ''
 output_device: ''
 wasapi_exclusive: false

@@ -17,6 +17,8 @@ BUILTIN_MODULES = (
     "bob.tools.builtin.clock",
     "bob.tools.builtin.conversation",
     "bob.tools.builtin.web",
+    "bob.tools.builtin.search",
+    "bob.tools.builtin.summarize",
     "bob.tools.builtin.notes",
     "bob.tools.builtin.recall",
     "bob.tools.builtin.mood",
