@@ -7,9 +7,10 @@ import customtkinter as ctk
 
 from bob.state import State
 from bob.ui import theme as theming
+from bob.ui.chat_sidebar import ChatSidebar
 from bob.ui.theme import Theme, set_role
-from bob.ui.stats_line import format_usage_stats
 from bob.ui.transcript import paint_transcript
+from bob.ui.usage_meters import UsageMeters
 from bob.win32_app import hide_from_taskbar, show_in_taskbar
 
 
@@ -23,6 +24,8 @@ class Overlay(ctk.CTkToplevel):
         on_quit: Callable[[], None],
         on_submit: Callable[[str], None] | None = None,
         on_settings: Callable[[], None] | None = None,
+        on_new_chat: Callable[[], None] | None = None,
+        on_load_session: Callable[[int], None] | None = None,
         *,
         visible: bool = True,
     ) -> None:
@@ -32,9 +35,11 @@ class Overlay(ctk.CTkToplevel):
         self.on_quit = on_quit
         self.on_submit = on_submit
         self.on_settings = on_settings
+        self.on_new_chat = on_new_chat
+        self.on_load_session = on_load_session
         self.on_hide = None
         self._user_visible = bool(visible)
-        self._saved_geometry = "560x460+40+40"
+        self._saved_geometry = "760x460+40+40"
         self._messages: list[dict] = []
         self._pending_user = ""
         self._pending_reply = ""
@@ -52,13 +57,26 @@ class Overlay(ctk.CTkToplevel):
 
         apply_tk_icon(self)
         self.geometry(self._saved_geometry)
-        self.minsize(420, 320)
+        self.minsize(560, 320)
         self.resizable(True, True)
         self.attributes("-topmost", True)
         self.configure(**theme.window())
         self.protocol("WM_DELETE_WINDOW", self.hide)
 
-        header = ctk.CTkFrame(self, fg_color="transparent")
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+
+        self.sidebar = ChatSidebar(
+            body,
+            on_new_chat=self._new_chat,
+            on_select_session=self._load_session,
+        )
+        self.sidebar.pack(side="left", fill="y", padx=(8, 0), pady=8)
+
+        main = ctk.CTkFrame(body, fg_color="transparent")
+        main.pack(side="left", fill="both", expand=True)
+
+        header = ctk.CTkFrame(main, fg_color="transparent")
         header.pack(fill="x", padx=16, pady=(14, 2))
 
         title_row = ctk.CTkFrame(header, fg_color="transparent")
@@ -101,15 +119,15 @@ class Overlay(ctk.CTkToplevel):
         )
         self.settings_btn.pack(side="right")
 
-        self.level = ctk.CTkProgressBar(self, height=8, **theme.progress(theme.state_color(State.LOADING)))
+        self.level = ctk.CTkProgressBar(main, height=8, **theme.progress(theme.state_color(State.LOADING)))
         self.level.pack(fill="x", padx=16, pady=(10, 8))
         self.level.set(0)
 
-        self.transcript = ctk.CTkTextbox(self, font=theme.font(13), wrap="word", **theme.textbox())
+        self.transcript = ctk.CTkTextbox(main, font=theme.font(13), wrap="word", **theme.textbox())
         self.transcript.pack(fill="both", expand=True, padx=16, pady=(0, 8))
         self._paint()
 
-        composer = ctk.CTkFrame(self, fg_color="transparent")
+        composer = ctk.CTkFrame(main, fg_color="transparent")
         composer.pack(fill="x", padx=16, pady=(0, 12))
         self.composer = ctk.CTkEntry(composer, placeholder_text="Type a message and press Enter", **theme.entry())
         self.composer.pack(side="left", fill="x", expand=True)
@@ -127,16 +145,7 @@ class Overlay(ctk.CTkToplevel):
         )
         self.send_btn.pack(side="right", padx=(8, 0))
 
-        self.stats = set_role(
-            ctk.CTkLabel(
-                self,
-                text="",
-                font=theme.font(11),
-                text_color=theme.text_muted,
-                anchor="w",
-            ),
-            "muted",
-        )
+        self.stats = UsageMeters(main)
         self.stats.pack(fill="x", padx=16, pady=(0, 10))
 
         if visible:
@@ -165,6 +174,17 @@ class Overlay(ctk.CTkToplevel):
         if self.on_settings:
             self.on_settings()
 
+    def _new_chat(self) -> None:
+        if self.on_new_chat:
+            self.on_new_chat()
+
+    def _load_session(self, session_id: int) -> None:
+        if self.on_load_session:
+            self.on_load_session(int(session_id))
+
+    def set_sessions(self, sessions: Sequence[dict], current_id: int) -> None:
+        self.sidebar.refresh(list(sessions), int(current_id or 0))
+
     def _submit_typed(self, _event=None) -> None:  # noqa: ANN001
         text = (self.composer.get() or "").strip()
         if not text or self.on_submit is None:
@@ -179,6 +199,8 @@ class Overlay(ctk.CTkToplevel):
         color = theme.state_color(self._state)
         self.status.configure(text_color=color)
         self.level.configure(progress_color=color)
+        self.stats.apply_theme()
+        self.sidebar.refresh(self.sidebar._sessions, self.sidebar._current_id)
         self._paint()
 
     def set_state(self, state: State, detail: str = "") -> None:
@@ -211,14 +233,12 @@ class Overlay(ctk.CTkToplevel):
             self._sync_stats()
 
     def _sync_stats(self) -> None:
-        self.stats.configure(
-            text=format_usage_stats(
-                detail=self._detail,
-                gpu=self._stat_values.get("gpu"),
-                vram=self._stat_values.get("vram"),
-                cpu=self._stat_values.get("cpu"),
-                context=self._stat_values.get("context"),
-            )
+        self.stats.set_values(
+            detail=self._detail,
+            gpu=self._stat_values.get("gpu"),
+            vram=self._stat_values.get("vram"),
+            cpu=self._stat_values.get("cpu"),
+            context=self._stat_values.get("context"),
         )
 
     def set_level(self, value: float) -> None:

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 
+def format_meter_label(label: str, value: float) -> str:
+    return f"{label} {int(round(float(value) * 100))}%"
+
+
 def format_usage_stats(
     *,
     detail: str = "",
@@ -14,14 +18,14 @@ def format_usage_stats(
     if detail:
         parts.append(detail)
     stats: list[str] = []
-    for value, label in (
+    for value, name in (
         (gpu, "GPU"),
         (vram, "VRAM"),
         (cpu, "CPU"),
         (context, "CONTEXT"),
     ):
         if value is not None:
-            stats.append(f"{label} {int(round(float(value) * 100))}%")
+            stats.append(format_meter_label(name, value))
     if stats:
         parts.append(" · ".join(stats))
     return " · ".join(parts)

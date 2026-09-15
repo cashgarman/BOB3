@@ -15,6 +15,10 @@ class ChatMessage:
     created_at: str
 
 
+def display_session_title(title: str | None) -> str:
+    return (title or "").strip() or "New conversation"
+
+
 class ChatStore:
     """SQLite-backed conversation log. Survives restarts."""
 
@@ -49,6 +53,16 @@ class ChatStore:
                     ON messages(session_id, id);
                 """
             )
+            cols = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()}
+            if "updated_at" not in cols:
+                self._conn.execute("ALTER TABLE sessions ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''")
+                self._conn.execute(
+                    "UPDATE sessions SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''"
+                )
+            if "title_generated" not in cols:
+                self._conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN title_generated INTEGER NOT NULL DEFAULT 0"
+                )
             self._conn.commit()
 
     def latest_session_id(self) -> int | None:
@@ -58,7 +72,9 @@ class ChatStore:
 
     def new_session(self) -> int:
         with self._lock:
-            cur = self._conn.execute("INSERT INTO sessions (title) VALUES ('')")
+            cur = self._conn.execute(
+                "INSERT INTO sessions (title, updated_at, title_generated) VALUES ('', datetime('now'), 0)"
+            )
             self._conn.commit()
             return int(cur.lastrowid)
 
@@ -66,18 +82,58 @@ class ChatStore:
         sid = self.latest_session_id()
         return sid if sid is not None else self.new_session()
 
+    def session_message_count(self, session_id: int) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM messages WHERE session_id = ?",
+                (int(session_id),),
+            ).fetchone()
+        return int(row["n"] or 0) if row else 0
+
+    def session_title(self, session_id: int) -> str:
+        with self._lock:
+            row = self._conn.execute("SELECT title FROM sessions WHERE id = ?", (int(session_id),)).fetchone()
+        return str(row["title"] or "") if row else ""
+
+    def session_title_generated(self, session_id: int) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT title_generated FROM sessions WHERE id = ?",
+                (int(session_id),),
+            ).fetchone()
+        return bool(row and int(row["title_generated"] or 0))
+
+    def touch_session(self, session_id: int) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE sessions SET updated_at = datetime('now') WHERE id = ?",
+                (int(session_id),),
+            )
+            self._conn.commit()
+
+    def update_session_title(self, session_id: int, title: str, *, generated: bool = True) -> None:
+        cleaned = (title or "").strip()[:80]
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET title = ?, title_generated = ?, updated_at = datetime('now')
+                WHERE id = ?
+                """,
+                (cleaned, 1 if generated else 0, int(session_id)),
+            )
+            self._conn.commit()
+
     def add_message(self, session_id: int, role: str, content: str) -> int:
         with self._lock:
             cur = self._conn.execute(
                 "INSERT INTO messages (session_id, role, content) VALUES (?, ?, ?)",
                 (session_id, role, content),
             )
-            row = self._conn.execute("SELECT title FROM sessions WHERE id = ?", (session_id,)).fetchone()
-            if row is not None and not str(row["title"] or "").strip() and role == "user":
-                self._conn.execute(
-                    "UPDATE sessions SET title = ? WHERE id = ?",
-                    (content.strip()[:80], session_id),
-                )
+            self._conn.execute(
+                "UPDATE sessions SET updated_at = datetime('now') WHERE id = ?",
+                (int(session_id),),
+            )
             self._conn.commit()
             return int(cur.lastrowid)
 
@@ -107,10 +163,10 @@ class ChatStore:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT s.id, s.created_at, s.title,
+                SELECT s.id, s.created_at, s.updated_at, s.title, s.title_generated,
                        (SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id) AS n
                 FROM sessions s
-                ORDER BY s.id DESC
+                ORDER BY datetime(COALESCE(NULLIF(s.updated_at, ''), s.created_at)) DESC, s.id DESC
                 LIMIT ?
                 """,
                 (int(limit),),
@@ -119,7 +175,9 @@ class ChatStore:
             {
                 "id": int(row["id"]),
                 "created_at": str(row["created_at"]),
+                "updated_at": str(row["updated_at"] or row["created_at"] or ""),
                 "title": str(row["title"] or ""),
+                "title_generated": bool(int(row["title_generated"] or 0)),
                 "count": int(row["n"] or 0),
             }
             for row in rows

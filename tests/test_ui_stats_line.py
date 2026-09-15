@@ -11,6 +11,13 @@ def test_format_usage_stats_includes_context():
     assert "CONTEXT 33%" in text
 
 
+def test_format_meter_label():
+    from bob.ui.stats_line import format_meter_label
+
+    assert format_meter_label("GPU", 0.25) == "GPU 25%"
+    assert format_meter_label("CONTEXT", 0.415) == "CONTEXT 42%"
+
+
 def test_format_usage_stats_with_detail():
     text = format_usage_stats(detail="ollama", gpu=0.2, context=0.75)
     assert text.startswith("ollama")

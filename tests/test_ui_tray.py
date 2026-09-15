@@ -102,7 +102,7 @@ def test_tray_conversations_submenu():
     tray = Tray(app)
     item = find_menu_item(tray.icon.menu, "Conversations", "Morning chat  (4)")
     assert item.checked is True
-    click_menu(tray, "Conversations", "Untitled")
+    click_menu(tray, "Conversations", "New conversation")
     assert ("load_session", 2) in app.calls
 
 

@@ -18,8 +18,10 @@ def test_chat_store_sessions_and_messages(tmp_path: Path):
 
     sessions = store.list_sessions()
     assert sessions[0]["id"] == sid
-    assert sessions[0]["title"] == "Hello there friend"
+    assert sessions[0]["title"] == ""
     assert sessions[0]["count"] == 2
+    assert store.session_message_count(sid) == 2
+    assert store.session_title_generated(sid) is False
 
     other = store.new_session()
     assert other != sid
@@ -27,13 +29,28 @@ def test_chat_store_sessions_and_messages(tmp_path: Path):
     store.close()
 
 
-def test_chat_store_title_only_from_first_user(tmp_path: Path):
+def test_chat_store_does_not_auto_title_from_user(tmp_path: Path):
     store = ChatStore(tmp_path / "chat.db")
     sid = store.new_session()
-    store.add_message(sid, "assistant", "Should not title")
     store.add_message(sid, "user", "Real title that is long " + ("x" * 100))
-    store.add_message(sid, "user", "Second user")
-    sessions = {row["id"]: row for row in store.list_sessions()}
-    assert sessions[sid]["title"].startswith("Real title")
-    assert len(sessions[sid]["title"]) <= 80
+    store.add_message(sid, "assistant", "ok")
+    assert store.session_title(sid) == ""
+    store.close()
+
+
+def test_chat_store_update_title_and_updated_at_order(tmp_path: Path):
+    store = ChatStore(tmp_path / "chat.db")
+    older = store.new_session()
+    newer = store.new_session()
+    store.add_message(older, "user", "first")
+    store.update_session_title(older, "Older chat", generated=True)
+    store.add_message(newer, "user", "second")
+    with store._lock:
+        store._conn.execute("UPDATE sessions SET updated_at = '2026-01-01 00:00:00' WHERE id = ?", (newer,))
+        store._conn.execute("UPDATE sessions SET updated_at = '2026-01-02 00:00:00' WHERE id = ?", (older,))
+        store._conn.commit()
+    sessions = store.list_sessions()
+    assert [row["id"] for row in sessions][:2] == [older, newer]
+    assert sessions[0]["title"] == "Older chat"
+    assert sessions[0]["title_generated"] is True
     store.close()

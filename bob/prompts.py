@@ -36,6 +36,12 @@ _FALLBACK_TOOL_SYNTHESIS = (
     "been run. Use the user's question, conversation history, background notes, and tool "
     "results to produce one short spoken answer. Output ONLY the exact words to speak aloud."
 )
+_FALLBACK_SESSION_TITLE = (
+    "You name chat conversations with a short descriptive title, like a chat history list. "
+    "Output ONLY the title. Use about 3 to 8 words. No quotes, no trailing punctuation, "
+    "no preamble, and no markdown. Capture the topic of the exchange, not a copy of the "
+    "user's request."
+)
 
 
 def _read(name: str, fallback: str) -> str:
@@ -64,6 +70,10 @@ def load_tool_guidance() -> str:
 
 def load_tool_synthesis_prompt() -> str:
     return _read("tool_synthesis.txt", _FALLBACK_TOOL_SYNTHESIS)
+
+
+def load_session_title_prompt() -> str:
+    return _read("session_title.txt", _FALLBACK_SESSION_TITLE)
 
 
 def save_system_prompt(text: str) -> None:

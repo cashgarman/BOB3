@@ -111,6 +111,7 @@ class Assistant:
         self._pending_user = ""
         self._pending_reply = ""
         self._pending_thought = ""
+        self._title_jobs: set[int] = set()
         self.audio = AudioHub(
             sample_rate=self.settings.sample_rate,
             input_device=self.settings.input_device or None,
@@ -172,6 +173,8 @@ class Assistant:
             self.quit,
             on_submit=self.submit_text,
             on_settings=self.open_settings,
+            on_new_chat=self.new_chat,
+            on_load_session=self.load_session,
             visible=self.settings.show_overlay,
         )
         self.overlay.on_hide = lambda: self.set_overlay_visible(False, persist=True)
@@ -179,6 +182,7 @@ class Assistant:
         self.toast = ListenToast(self.root, on_click=self.toggle_listen)
         sample_usage()
         self._refresh_talk()
+        self._refresh_chat_sidebar()
         self._start_tray()
         self.root.after(80, self._boot)
         self.root.after(50, self._poll_level)
@@ -828,21 +832,101 @@ class Assistant:
             self.llm.reset()
             self._restore_llm_history()
             self._refresh_talk()
+            self._refresh_chat_sidebar()
             if self.tray:
                 self.tray.refresh()
 
         self._ui(apply)
 
+    def new_chat(self) -> None:
+        self._new_chat()
+
     def _new_chat(self) -> None:
         self.llm.reset()
-        self._session_id = self.chat.new_session()
+        if self.chat.session_message_count(self._session_id) > 0:
+            self._session_id = self.chat.new_session()
         self._turns = []
         self._pending_user = ""
         self._pending_reply = "New conversation."
         self._pending_thought = ""
         self._refresh_talk()
+        self._refresh_chat_sidebar()
         if self.tray:
             self.tray.refresh()
+
+    def _refresh_chat_sidebar(self) -> None:
+        if self.overlay is None:
+            return
+        try:
+            sessions = self.chat.list_sessions(limit=100)
+        except Exception:
+            log.exception("Failed to list chat sessions")
+            return
+        current = int(self._session_id)
+
+        def apply() -> None:
+            if self.overlay:
+                self.overlay.set_sessions(sessions, current)
+
+        try:
+            if threading.current_thread() is threading.main_thread():
+                apply()
+            else:
+                self._ui(apply)
+        except Exception:
+            self._ui(apply)
+
+    def _maybe_generate_session_title(self, session_id: int) -> None:
+        sid = int(session_id)
+        try:
+            if self.chat.session_title_generated(sid):
+                return
+            if self.chat.session_title(sid).strip():
+                return
+            messages = self.chat.list_messages(sid)
+        except Exception:
+            log.exception("Failed to inspect session for title")
+            return
+        user = next((m.content for m in messages if m.role == "user"), "").strip()
+        assistant = next((m.content for m in messages if m.role == "assistant"), "").strip()
+        if not user or not assistant:
+            return
+        if sid in self._title_jobs:
+            return
+        self._title_jobs.add(sid)
+        threading.Thread(
+            target=self._generate_session_title_worker,
+            args=(sid, user, assistant),
+            daemon=True,
+            name="session-title",
+        ).start()
+
+    def _generate_session_title_worker(self, session_id: int, user_text: str, assistant_text: str) -> None:
+        from bob.session_title import fallback_session_title, generate_session_title
+
+        try:
+            title = generate_session_title(self.llm.host, self.llm.model, user_text, assistant_text)
+            if not title:
+                title = fallback_session_title(user_text)
+            self.chat.update_session_title(session_id, title, generated=True)
+
+            def apply() -> None:
+                self._refresh_chat_sidebar()
+                if self.tray:
+                    self.tray.refresh()
+
+            self._ui(apply)
+        except Exception:
+            log.exception("Failed to generate session title")
+            try:
+                self.chat.update_session_title(
+                    session_id, fallback_session_title(user_text), generated=True
+                )
+                self._ui(self._refresh_chat_sidebar)
+            except Exception:
+                log.exception("Failed to persist fallback session title")
+        finally:
+            self._title_jobs.discard(int(session_id))
 
     def _enqueue_chunk(self, chunk) -> None:
         if self._stop.is_set():
@@ -1039,6 +1123,9 @@ class Assistant:
             self._pending_reply = ""
             self._pending_thought = ""
         self._refresh_talk()
+        self._refresh_chat_sidebar()
+        if role == "assistant":
+            self._maybe_generate_session_title(self._session_id)
 
     def _commit_assistant_if_needed(self, text: str) -> bool:
         """Persist a partial assistant reply when the user interrupts mid-response."""

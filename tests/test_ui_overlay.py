@@ -140,9 +140,41 @@ def test_overlay_set_stats(ui):
     ui.set_state(State.THINKING, "ollama")
     ui.set_stats(gpu=0.25, vram=0.5, cpu=0.12, context=0.41)
     pump(ui)
-    text = ui.stats.cget("text")
-    assert "ollama" in text
-    assert "GPU 25%" in text
-    assert "VRAM 50%" in text
-    assert "CPU 12%" in text
-    assert "CONTEXT 41%" in text
+    assert ui.stats.detail_text() == "ollama"
+    labels = ui.stats.meter_labels()
+    assert labels["gpu"] == "GPU 25%"
+    assert labels["vram"] == "VRAM 50%"
+    assert labels["cpu"] == "CPU 12%"
+    assert labels["context"] == "CONTEXT 41%"
+    values = ui.stats.meter_values()
+    assert abs(values["gpu"] - 0.25) < 1e-6
+    assert abs(values["vram"] - 0.5) < 1e-6
+    assert abs(values["cpu"] - 0.12) < 1e-6
+    assert abs(values["context"] - 0.41) < 1e-6
+
+
+def test_overlay_new_chat_button(ui):
+    calls = []
+    ui.on_new_chat = lambda: calls.append(True)
+    find_widget(ui, ctk.CTkButton, text="New Chat").invoke()
+    pump(ui)
+    assert calls == [True]
+
+
+def test_overlay_sidebar_sessions_and_select(ui):
+    loaded = []
+    ui.on_load_session = loaded.append
+    ui.set_sessions(
+        [
+            {"id": 7, "title": "BBC headlines", "count": 4, "created_at": "2026-09-14", "updated_at": "2026-09-14"},
+            {"id": 3, "title": "", "count": 0, "created_at": "2026-09-13", "updated_at": "2026-09-13"},
+        ],
+        7,
+    )
+    pump(ui)
+    texts = [str(child.cget("text")) for child in ui.sidebar.listbox.winfo_children()]
+    assert any(text.startswith("BBC headlines") for text in texts)
+    untitled = next(child for child in ui.sidebar.listbox.winfo_children() if "New conversation" in str(child.cget("text")))
+    untitled.invoke()
+    pump(ui)
+    assert loaded == [3]

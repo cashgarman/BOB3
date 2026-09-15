@@ -69,6 +69,7 @@ def _make_assistant(tmp_path: Path, monkeypatch):
         def __init__(self, root):
             self.root = root
             self.ready = True
+            self.embedder = SimpleNamespace(dim=8)
 
         def load(self):
             return None
@@ -232,11 +233,16 @@ def test_assistant_new_chat_and_load_session(ui, tmp_path, monkeypatch):
     assistant.state = State.IDLE
 
     first = assistant._session_id
+    assistant.chat.add_message(first, "user", "old")
     assistant._turns = [{"role": "user", "content": "old"}]
     assistant._new_chat()
     assert assistant._session_id != first
     assert assistant._turns == []
     assert assistant._pending_reply == "New conversation."
+
+    empty = assistant._session_id
+    assistant._new_chat()
+    assert assistant._session_id == empty
 
     other = assistant.chat.new_session()
     assistant.chat.add_message(other, "user", "from history")
@@ -244,6 +250,32 @@ def test_assistant_new_chat_and_load_session(ui, tmp_path, monkeypatch):
     assert assistant._session_id == other
     assert assistant._turns[0]["content"] == "from history"
     assistant.tray.refresh.assert_called()
+
+
+def test_assistant_generates_title_after_first_exchange(ui, tmp_path, monkeypatch):
+    assistant, *_ = _make_assistant(tmp_path, monkeypatch)
+    assistant.overlay = ui
+    assistant.hud = None
+    assistant.toast = None
+    assistant.tray = MagicMock()
+    assistant._ui = lambda fn: fn()
+    assistant.state = State.IDLE
+
+    class ImmediateThread:
+        def __init__(self, target=None, args=(), kwargs=None, daemon=False, name=""):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    monkeypatch.setattr("bob.app.threading.Thread", ImmediateThread)
+    monkeypatch.setattr("bob.session_title.generate_session_title", lambda *a, **k: "BBC Headlines")
+    assistant._commit_turn("user", "What's on the BBC?")
+    assistant._commit_turn("assistant", "Here are today's headlines.")
+    assert assistant.chat.session_title(assistant._session_id) == "BBC Headlines"
+    assert assistant.chat.session_title_generated(assistant._session_id) is True
 
 
 def test_assistant_apply_setting_live_fields(ui, tmp_path, monkeypatch):

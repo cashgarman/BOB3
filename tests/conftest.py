@@ -56,6 +56,11 @@ def ui(overlay):
     overlay.on_toggle = lambda: toggled.append(1)
     overlay.on_quit = lambda: None
     overlay.on_hide = None
+    overlay.on_new_chat = None
+    overlay.on_load_session = None
+    overlay.sidebar.on_new_chat = overlay._new_chat
+    overlay.sidebar.on_select_session = overlay._load_session
+    overlay.set_sessions([], 0)
     theming.set_current(theming.preset("midnight"))
     overlay.apply_theme(theming.current())
     overlay.set_state(State.IDLE)

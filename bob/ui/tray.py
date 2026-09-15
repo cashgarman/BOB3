@@ -6,6 +6,7 @@ from collections.abc import Callable
 from PIL import Image
 import pystray
 
+from bob.chat_store import display_session_title
 from bob.state import State
 from bob.ui.settings_dialog import COMPUTE, STT_MODELS, VOICES, WAKE_WORDS
 from bob.ui.theme import PRESET_KEYS, PRESETS
@@ -136,7 +137,7 @@ class Tray:
         try:
             current = int(getattr(self.app, "_session_id", 0) or 0)
             for row in self.app.chat.list_sessions(8):
-                title = (row.get("title") or "Untitled").strip() or "Untitled"
+                title = display_session_title(row.get("title"))
                 if len(title) > 42:
                     title = title[:41] + "…"
                 count = int(row.get("count") or 0)
