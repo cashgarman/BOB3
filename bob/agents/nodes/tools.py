@@ -128,7 +128,7 @@ def tools_node(state: TurnState) -> dict[str, Any]:
                 reply = "Done — I updated my system prompt."
             if not reply:
                 reply = "I couldn't update my system prompt right now."
-            llm.history.append({"role": "assistant", "content": reply})
+            llm._commit_assistant_reply(reply)
             return _spoken_update(reply, used_tools=True, results=results, trusted=True)
 
         if branch == "reflect":
@@ -145,7 +145,7 @@ def tools_node(state: TurnState) -> dict[str, Any]:
             reply = format_prompt_reflect_fallback(system_body)
             llm._append_internal_thought("Reflected on the prompt files.", on_thought)
             if reply:
-                llm.history.append({"role": "assistant", "content": reply})
+                llm._commit_assistant_reply(reply)
             if reply:
                 return _spoken_update(reply, used_tools=True, results=results, trusted=True)
 
@@ -161,7 +161,7 @@ def tools_node(state: TurnState) -> dict[str, Any]:
             reply = format_prompt_catalog_reply(catalog)
             llm._append_internal_thought("Summarized the prompt files.", on_thought)
             if reply:
-                llm.history.append({"role": "assistant", "content": reply})
+                llm._commit_assistant_reply(reply)
             if reply:
                 return _spoken_update(reply, used_tools=True, results=results, trusted=True)
 
@@ -175,7 +175,7 @@ def tools_node(state: TurnState) -> dict[str, Any]:
         reply = format_prompt_spoken_reply(user_text, catalog, system_text)
         if reply:
             llm._append_internal_thought("Spoke the prompt file contents.", on_thought)
-            llm.history.append({"role": "assistant", "content": reply})
+            llm._commit_assistant_reply(reply)
             return _spoken_update(reply, used_tools=True, results=results, trusted=True)
 
     if kind == "calendar" and on_tool:
@@ -188,7 +188,7 @@ def tools_node(state: TurnState) -> dict[str, Any]:
         reply = _format_calendar_tool_result(user_text, result)
         if reply:
             llm._append_internal_thought("Spoke the calendar fact from the clock.", on_thought)
-            llm.history.append({"role": "assistant", "content": reply})
+            llm._commit_assistant_reply(reply)
             return _spoken_update(reply, used_tools=True, results=[("get_current_time", result)])
 
     if kind == "web" and on_tool:
@@ -276,7 +276,7 @@ def _run_tool_rounds(
         except GeneratorExit:
             partial = "".join(spoken).strip()
             if partial and not llm._history_ends_with_assistant(partial):
-                llm.history.append({"role": "assistant", "content": partial})
+                llm._commit_assistant_reply(partial)
             raise
         except RuntimeError as exc:
             if offered and _is_tools_unsupported_error(str(exc)):
@@ -304,7 +304,7 @@ def _run_tool_rounds(
                 except Exception as exc:
                     result = f"Error: tool '{hinted}' failed: {exc}"
                 if content.strip():
-                    llm.history.append({"role": "assistant", "content": content})
+                    llm._commit_assistant_reply(content)
                 llm.history.append({"role": "tool", "tool_name": hinted, "content": result})
                 used_tools = True
                 results.append((hinted, result))
@@ -317,7 +317,7 @@ def _run_tool_rounds(
                                 "Used a deterministic summary of the search results.",
                                 on_thought,
                             )
-                            llm.history.append({"role": "assistant", "content": reply})
+                            llm._commit_assistant_reply(reply)
                     if reply:
                         return _spoken_update(reply, used_tools=True, results=results)
                 continue
@@ -346,7 +346,7 @@ def _run_tool_rounds(
             direct = _try_direct_answer(spoken_user)
             if direct:
                 llm._append_internal_thought("Answered directly (skipped tool planning).", on_thought)
-                llm.history.append({"role": "assistant", "content": direct})
+                llm._commit_assistant_reply(direct)
                 return _spoken_update(direct, used_tools=used_tools, results=results)
             force_final = True
             llm._append_internal_thought("Skipped tool planning; answering directly.", on_thought)
@@ -437,7 +437,7 @@ def _force_needed_tool(
         llm.history.append({"role": "tool", "tool_name": "get_current_time", "content": result})
         reply = _format_time_tool_result(result)
         if reply:
-            llm.history.append({"role": "assistant", "content": reply})
+            llm._commit_assistant_reply(reply)
             return reply, [("get_current_time", result)]
         return None
     if needs_chat_context(spoken_user) and not _fresh_web_search(spoken_user):
@@ -458,7 +458,7 @@ def _force_needed_tool(
                     "Used a deterministic summary of the search results.",
                     on_thought,
                 )
-                llm.history.append({"role": "assistant", "content": reply})
+                llm._commit_assistant_reply(reply)
         if reply:
             return reply, [("web_search", result)]
     if needs_prompt_files(spoken_user):
@@ -487,7 +487,7 @@ def _force_needed_tool(
             llm.history.append({"role": "tool", "tool_name": "read_file", "content": system_text})
         reply = format_prompt_spoken_reply(spoken_user, catalog, system_text) or format_prompt_catalog_reply(catalog)
         if reply:
-            llm.history.append({"role": "assistant", "content": reply})
+            llm._commit_assistant_reply(reply)
             results = [("list_prompts", catalog)]
             if system_text:
                 results.append(("read_file", system_text))

@@ -31,6 +31,9 @@ class TurnState(TypedDict, total=False):
     used_tools: bool
     gate_ok: bool
     trusted_reply: bool
+    judge_ok: bool
+    judge_reason: str
+    used_fallback: bool
     repair_count: int
     prompt_version: int
     session_id: int

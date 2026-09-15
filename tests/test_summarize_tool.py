@@ -135,34 +135,29 @@ def test_fallback_headlines_from_search():
     assert "and Canada ice-shelf loss" in out
 
 
-def test_spoken_from_tool_text_rejects_monologue():
-    from bob.llm import _spoken_from_tool_text
+def test_finalize_tool_synthesis_rejects_monologue_and_falls_back(monkeypatch):
+    """Regression test for tool-synthesis monologue.
 
+    `_spoken_from_tool_text` no longer does semantic monologue detection —
+    that filtering moved to the LLM judge inside `_finalize_tool_synthesis`
+    (generate -> judge -> retry-with-reason -> fallback), matching the
+    speaker-path redesign.
+    """
+    from bob.llm import OllamaChat
+
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
     monologue = (
         "Okay, the user asked me to search online for the top BBC news headlines. "
         "But I need to remember that I'm supposed to turn the source material into a short spoken answer."
     )
-    assert _spoken_from_tool_text(monologue, "BBC headlines") == ""
+    monkeypatch.setattr(chat, "_try_synthesize_current_tools", lambda *a, **k: monologue)
+    monkeypatch.setattr(chat, "_judge_reply", lambda question, reply: (False, "narrates its own reasoning"))
 
+    reply = chat._finalize_tool_synthesis("BBC headlines")
 
-def test_spoken_from_tool_text_rejects_truncated_summarizer_planning():
-    from bob.llm import _spoken_from_tool_text
-
-    monologue = (
-        "That's two sentences. Let me make sure it's exactly what to speak aloud. "
-        "No extra words. Avoid mentioning the source material directly—just the info from it. Also"
-    )
-    assert _spoken_from_tool_text(monologue, "Search online for the top BBC News articles") == ""
-
-
-def test_spoken_from_tool_text_rejects_quoted_phrase_from_monologue():
-    from bob.llm import _spoken_from_tool_text
-
-    monologue = (
-        'Okay, the user asked for BBC headlines. Entry 3 mentions "Compulsory lentils" '
-        'and "Boris flees Vlad drone blitz" as the top stories.'
-    )
-    assert _spoken_from_tool_text(monologue, "Search online for the top BBC News articles") == ""
+    assert reply
+    assert reply != monologue
+    assert chat.history[-1]["content"] == reply
 
 
 def test_headlines_from_newspaper_roundup_prefers_real_stories():

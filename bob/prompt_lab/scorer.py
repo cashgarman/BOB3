@@ -4,12 +4,7 @@ import json
 import re
 from typing import Any
 
-from bob.llm import (
-    _echoes_prompt,
-    _is_internal_monologue,
-    _looks_like_spoken_answer,
-    is_failure_reply,
-)
+from bob.llm import _is_internal_monologue, _looks_like_spoken_answer, is_failure_reply
 
 SCORE_PROMPT = """\
 Score this local voice-assistant reply. Return JSON only:
@@ -25,6 +20,14 @@ Rules:
 _JSON_RE = re.compile(r"\{.*\}", re.S)
 _LEAK_RE = re.compile(
     r"\b(tool(?:s)?|web_search|conversation_log|background notes|system prompt|as an ai)\b",
+    re.IGNORECASE,
+)
+# Small planning-narration pre-filter used only by the offline prompt-lab
+# shadow evaluator (bob/prompt_lab/graph.py), which scores candidate prompts
+# against a `generate` callback with no live judge call available. The live
+# turn pipeline no longer needs this — see `OllamaChat._judge_reply`.
+_PLANNING_STARTER_RE = re.compile(
+    r"^(?:okay,?\s+)?(?:the user is|let me think|let me recall|i should|i need to)\b",
     re.IGNORECASE,
 )
 
@@ -53,7 +56,23 @@ def parse_score_json(raw: str) -> dict[str, float]:
     return out
 
 
-def heuristic_scores(reply: str, question: str = "") -> dict[str, float]:
+def heuristic_scores(
+    reply: str,
+    question: str = "",
+    *,
+    judge_ok: bool | None = None,
+    used_fallback: bool = False,
+) -> dict[str, float]:
+    """Score a reply already spoken to the user.
+
+    `overall` reflects the independent LLM judge result (`_judge_reply` in
+    bob/llm.py) when one ran for this turn, not a second pass of the same
+    structural check that decided whether to accept the reply in the first
+    place — that circularity used to make every accepted reply "score=1.00"
+    regardless of quality. When no judge ran (deterministic/trusted
+    shortcuts like math answers or the clock), fall back to a structural
+    estimate built from the sub-scores below.
+    """
     text = (reply or "").strip()
     if is_failure_reply(text) or not text:
         return {
@@ -64,8 +83,8 @@ def heuristic_scores(reply: str, question: str = "") -> dict[str, float]:
             "overall": 0.0,
         }
     spoken_ok = 1.0 if _looks_like_spoken_answer(text, question) else 0.0
-    leak = 1.0 if _LEAK_RE.search(text) or _echoes_prompt(text) else 0.0
-    if _is_internal_monologue(text):
+    leak = 1.0 if _LEAK_RE.search(text) else 0.0
+    if _is_internal_monologue(text) or (judge_ok is None and _PLANNING_STARTER_RE.match(text)):
         spoken_ok = 0.0
         leak = max(leak, 0.8)
     grounding = 1.0 if text and question and question.lower().split()[0] and spoken_ok else (0.6 if text else 0.0)
@@ -74,7 +93,14 @@ def heuristic_scores(reply: str, question: str = "") -> dict[str, float]:
     follow = spoken_ok
     if text.count(". ") > 4 and "bullet" not in (question or "").lower():
         follow = min(follow, 0.4)
-    overall = max(0.0, min(1.0, 0.4 * spoken_ok + 0.25 * grounding + 0.2 * follow + 0.15 * (1.0 - leak)))
+
+    if judge_ok is True:
+        overall = 0.9 + 0.1 * follow
+    elif judge_ok is False:
+        overall = 0.5 if used_fallback else 0.0
+    else:
+        overall = 0.4 * spoken_ok + 0.25 * grounding + 0.2 * follow + 0.15 * (1.0 - leak)
+    overall = max(0.0, min(1.0, overall))
     return {
         "spoken_quality": spoken_ok,
         "grounding": grounding,

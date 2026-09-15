@@ -79,20 +79,79 @@ def test_choose_route_fast_paths():
     ) == ("tools", "prompts")
 
 
-def test_regex_gate_rejects_monologue():
+def test_regex_gate_rejects_empty_draft():
+    """The gate node is now only a structural check; semantic rejection is the judge's job."""
     runtime = TurnRuntime(llm=OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12))
     token = set_runtime(runtime)
     try:
         out = regex_gate_node(
             {
                 "user_text": "What time is it?",
-                "draft": "Okay, the user is asking for the current time. Let me think.",
-                "spoken": "Okay, the user is asking for the current time. Let me think.",
+                "draft": "",
+                "spoken": "",
             }
         )
     finally:
         reset_runtime(token)
     assert out["gate_ok"] is False
+
+
+def test_speaker_node_retries_then_falls_back_when_judge_rejects_twice(monkeypatch):
+    """Regression test for this conversation's exact bad replies.
+
+    Both generation attempts are judged unsafe, so the speaker node must
+    fall back to a safe canned reply instead of ever speaking either draft.
+    """
+    from bob.agents.nodes.speaker import speaker_node
+
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    bad_replies = iter(
+        [
+            "We are in the middle of a conversation. I've been working on your code all night.",
+            "Since I am an AI, but in this role I am BOB (a character), I should be consistent with the persona.",
+        ]
+    )
+    monkeypatch.setattr(chat, "_generate_spoken_answer", lambda *a, **k: next(bad_replies))
+    monkeypatch.setattr(chat, "_judge_reply", lambda question, reply: (False, "narrates its own reasoning"))
+
+    runtime = TurnRuntime(llm=chat)
+    token = set_runtime(runtime)
+    try:
+        out = speaker_node(
+            {
+                "user_text": "I'm really tired. I've been working on your code all night.",
+                "memory_block": "",
+            }
+        )
+    finally:
+        reset_runtime(token)
+    assert out["judge_ok"] is False
+    assert out["used_fallback"] is True
+    assert out["gate_ok"] is True
+    assert out["spoken"] not in {
+        "We are in the middle of a conversation. I've been working on your code all night.",
+        "Since I am an AI, but in this role I am BOB (a character), I should be consistent with the persona.",
+    }
+    assert chat.history[-1]["content"] == out["spoken"]
+
+
+def test_speaker_node_uses_judge_approved_draft():
+    from bob.agents.nodes.speaker import speaker_node
+
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    with patch.object(chat, "_generate_spoken_answer", return_value="That sounds exhausting — thanks for pushing through."):
+        with patch.object(chat, "_judge_reply", return_value=(True, "")) as judge:
+            runtime = TurnRuntime(llm=chat)
+            token = set_runtime(runtime)
+            try:
+                out = speaker_node({"user_text": "I've been working on your code all night.", "memory_block": ""})
+            finally:
+                reset_runtime(token)
+    judge.assert_called_once()
+    assert out["judge_ok"] is True
+    assert out["used_fallback"] is False
+    assert out["spoken"] == "That sounds exhausting — thanks for pushing through."
+    assert chat.history[-1]["content"] == "That sounds exhausting — thanks for pushing through."
 
 
 def test_turn_graph_compiles():
@@ -304,16 +363,23 @@ def test_stream_turn_system_prompt_reads_file():
 
 
 def test_stream_turn_location_ack():
+    """The deterministic direct-answer shortcut needs no LLM call to produce the reply.
+
+    It still gets routed through the validator's judge once (an existing
+    `_is_useless_reply` echo heuristic flags this specific phrasing as an
+    echo of the user's location), so the judge call is mocked to approve it.
+    """
     chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
-    with patch("bob.llm.httpx.Client") as client:
-        chunks = list(
-            stream_turn(
-                chat,
-                "I'm in Vernon, British Columbia, Canada.",
-                max_rounds=1,
+    with patch.object(OllamaChat, "_judge_reply", return_value=(True, "")):
+        with patch("bob.llm.httpx.Client") as client:
+            chunks = list(
+                stream_turn(
+                    chat,
+                    "I'm in Vernon, British Columbia, Canada.",
+                    max_rounds=1,
+                )
             )
-        )
-        client.assert_not_called()
+            client.assert_not_called()
     assert chunks == ["Got it, you're in Vernon, British Columbia, Canada."]
 
 

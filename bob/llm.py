@@ -25,56 +25,6 @@ _PREAMBLE_RE = re.compile(
     r"\b(let me check|i(?:['’]ll| will) (?:check|look|find)|give me a (?:moment|second))\b",
     re.IGNORECASE,
 )
-_MONOLOGUE_RE = re.compile(
-    r"(?:^|\n)\s*(?:okay,?\s+)?(?:the user is|let me think|let me recall|first,?\s+i need to|"
-    r"looking at the tools|the tools (?:list|provided|say)|from the known information|"
-    r"the instructions say|the tool response|previous response|in previous interactions|"
-    r"we are in the middle|middle of a conversation|"
-    r"so bob should|(?:wait|hmm),?\s+(?:the|but|maybe|so)\b)",
-    re.IGNORECASE,
-)
-_META_REPLY_RE = re.compile(
-    r"\b(should say|should respond|should call|needs to call|the user|the tool|bob should|"
-    r"the answer should be|answer should be|i should make sure|should make sure|"
-    r"main point is|key here is|"
-    r"in the background|perfect to share|matches their expectations|"
-    r"explanation is in the background|share as the|"
-    r"they(?:['’]ve| have) been|without overthinking|without caveats|"
-    r"universally (?:acceptable|accepted)|pretend i|overthinking|no_think)\b",
-    re.IGNORECASE,
-)
-_PLANNING_REPLY_RE = re.compile(
-    r"\b(the answer should be|answer should be|i should make sure|should make sure|"
-    r"in the background|perfect to share|that's perfect to|matches their expectations|"
-    r"their actual need|they could be|they might be|deeper need might be|"
-    r"explanation is in the background|share as the|for your use only|"
-    r"background too|planned the reply|meant to be heard|design limitations|"
-    r"reasoning process|i(?:'|')?m thinking about|let me think|i need to think|"
-    r"might need improvement|would need improvement|still thinking about|"
-    r"might improve later|improve later|answer later|will answer later)\b",
-    re.IGNORECASE,
-)
-_THIRD_PERSON_SPOKEN_RE = re.compile(
-    r"^(?:they|their|the user)\b",
-    re.IGNORECASE,
-)
-_FRAGMENT_START_RE = re.compile(r"^(?:but|and|or|also)\b", re.IGNORECASE)
-_META_SPOKEN_RE = re.compile(
-    r"\bsince (?:i am|i'm) an ai\b|\bas an ai,? i\b|\bai model\b|\blanguage model\b|"
-    r"\bin this role\b|\b(?:the )?persona\b|\bas bob\b|\(as bob\)|\(a character\)|"
-    r"\bthe instruction\b|\binstruction says\b|\bgive the fact first\b|\bone extra detail\b|"
-    r'\buse ["\']i["\'] and ["\']you["\']|\bresponded with\b|\bshould be consistent\b|'
-    r"\bno planning\b|\bbackground notes\b|\bcharacter\),|\brole i am\b|"
-    r"\bbut in this role\b|\bmeant to be heard\b",
-    re.IGNORECASE,
-)
-_SPOKEN_OPENER_RE = re.compile(
-    r"^(?:i\b|you\b|that|the|it|this|those|these|there|here|"
-    r"well|sure|yeah|yes|no|nope|sorry|thanks|thank you|hmm|oh|right|maybe|probably|"
-    r"hello|hi|hey|because|honestly|absolutely|not really|good question|let(?:'s| us)|lets|"
-    r"got it|sounds like|fair point|i hear you|i understand|fair enough)\b",
-    re.IGNORECASE,
-)
 _QUOTED_ANSWER_RE = re.compile(r'"([^"\n]{5,160})"')
 _TIME_TOOL_RE = re.compile(
     r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s.+?\s+at\s+"
@@ -100,6 +50,31 @@ _COUNT_BACK_RE = re.compile(r"\bcount\s+(?:down\s+|back\s+)?from\s+(\d+)\b", re.
 _LOCATION_STATED_RE = re.compile(
     r"^\s*(?:i(?:['’]m| am) (?:in|from)|i live in)\s+(.+?)\s*$",
     re.IGNORECASE,
+)
+
+# Structured-output judge: replaces the old regex whack-a-mole gate with a
+# single independent LLM quality check run on every spoken reply.
+_JUDGE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ok": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["ok"],
+}
+_JUDGE_SYSTEM_PROMPT = (
+    "You are a strict quality judge for BOB, a spoken voice assistant. "
+    "You are given the user's message and a reply BOB is about to speak aloud. "
+    "Decide if the reply is safe to speak as-is.\n\n"
+    "Reject it (ok=false) if it does any of the following:\n"
+    "- mentions being an AI, a language model, a persona, a character, a role, instructions, "
+    "or rules\n"
+    "- talks about itself, its own previous replies, or the conversation instead of answering\n"
+    "- is a sentence fragment, empty, or is not natural spoken language\n"
+    "- does not address what the user actually said\n"
+    "- just repeats the user's own words back at them\n\n"
+    "Otherwise ok=true. Respond with JSON only: "
+    '{"ok": true or false, "reason": "under 12 words, empty string if ok"}.'
 )
 
 
@@ -307,14 +282,27 @@ def wants_full_prompt_content(user_text: str) -> bool:
     return wants_verbatim_system_prompt(user_text)
 
 
+_PROMPT_REFLECT_DEFERRAL_PHRASES = (
+    "let me think",
+    "i need to think",
+    "still thinking about",
+    "i'm thinking about",
+    "im thinking about",
+    "reasoning process",
+    "might need improvement",
+    "would need improvement",
+    "might improve",
+    "improve later",
+    "answer later",
+)
+
+
 def _prompt_reflect_has_substance(text: str) -> bool:
     """Reflection answers must state an opinion or concrete change, not defer."""
     t = (text or "").strip().lower()
     if not t:
         return False
-    if _PLANNING_REPLY_RE.search(t):
-        return False
-    if any(phrase in t for phrase in ("might improve", "improve later", "answer later")):
+    if any(phrase in t for phrase in _PROMPT_REFLECT_DEFERRAL_PHRASES):
         return False
     opinion_markers = (
         "i think",
@@ -602,32 +590,6 @@ def _try_direct_answer(user_text: str) -> str:
     return ""
 
 
-_BAD_ANSWER_START_RE = re.compile(
-    r"^(?:it covers|i recall(?: that)?|first,?|as bob,?|hmm,?|okay,?|the user|let me|"
-    r"the extra detail|the sky being|i should|we are given|we are in|i need to|no extra|"
-    r"since they\b|since the user\b|since we are\b|"
-    r"so,?|wait,?|better not|best to|\"?\s*so the answer)\b",
-    re.IGNORECASE,
-)
-_INSTRUCTION_ECHO_RE = re.compile(
-    r"\b(no extra commentary|no extra words|direct answer only|spoken sentence|short natural sentence|"
-    r"natural sentence ending|give the direct answer|no planning|meta commentary|"
-    r"i must answer|i must reply|i need to respond|need to respond|"
-    r"respond as bob|as bob,? i|one short natural sentence|one or two short sentences?|"
-    r"reply aloud|middle of a conversation|"
-    r"keep answers concise|background notes|must phrase it naturally|"
-    r"shouldn't repeat|do not summarize aloud|for your use only|"
-    r"meant to be heard aloud|say only the answer|speak aloud|what to speak|"
-    r"two sentences|source material|let me make sure|avoid mentioning|exactly what)\b",
-    re.IGNORECASE,
-)
-_INSTRUCTION_MONOLOGUE_RE = re.compile(
-    r"\b(speak aloud|what to speak|two sentences|source material|no extra words|"
-    r"let me make sure|exactly what|avoid mentioning|turn the source|short spoken answer|"
-    r"output only|reply with only|never mention the user|these instructions|"
-    r"the info from it)\b",
-    re.IGNORECASE,
-)
 _INCOMPLETE_TAIL_WORDS = frozenset(
     {"also", "and", "but", "so", "then", "or", "just", "like", "with", "without", "plus"}
 )
@@ -653,69 +615,66 @@ _SHORT_SPOKEN_WORDS = frozenset(
         "absolutely",
     }
 )
-_PROMPT_ECHO_PHRASES = (
-    "keep answers concise",
-    "background notes",
-    "never repeat",
-    "must phrase it naturally",
-    "shouldn't repeat",
-    "do not summarize aloud",
-    "for your use only",
-    "short natural sentence",
-    "no extra commentary",
-    "meant to be heard aloud",
-    "say only the answer",
-    "no rules, no commentary",
-)
+def _obviously_broken(text: str) -> bool:
+    """Cheap checks that skip a wasted judge call on clearly-unusable text.
 
-
-def _echoes_prompt(text: str) -> bool:
-    lower = (text or "").lower()
-    return any(phrase in lower for phrase in _PROMPT_ECHO_PHRASES)
-
-
-def _is_instruction_monologue(text: str) -> bool:
-    return bool(_INSTRUCTION_MONOLOGUE_RE.search(text or ""))
-
-
-def _contains_unspoken_meta(text: str) -> bool:
-    return bool(_META_SPOKEN_RE.search(text or ""))
-
-
-def _looks_like_quoted_fragment(text: str) -> bool:
+    Semantic detection (self-reference, instruction leaks, meta-commentary)
+    now belongs to the LLM judge (`OllamaChat._judge_reply`). This only
+    catches text that's structurally broken: empty, a raw leftover think
+    tag, or a bare quoted fragment.
+    """
     t = (text or "").strip()
     if not t:
-        return False
+        return True
+    lower = t.lower()
+    if "<think" in lower or "</think" in lower:
+        return True
     if t[0] in "\"'“‘":
         return True
-    if re.search(r'\s-\sUse ["\']I["\']', t, re.IGNORECASE):
-        return True
     return False
 
 
-def _starts_like_spoken_reply(text: str) -> bool:
-    t = (text or "").strip()
-    if not t:
-        return False
-    if _SPOKEN_OPENER_RE.match(t):
-        return True
-    if re.match(r"^\d", t):
-        return True
-    if re.match(r"^[A-Z][a-z]+ (?:is|are|was|were|has|have|means)\b", t):
-        return True
-    return False
+_FALLBACK_FEELING_RE = re.compile(r"\bhow (?:are you feeling|do you feel|you feeling)\b", re.IGNORECASE)
+_FALLBACK_CONFUSION_RE = re.compile(
+    r"\bwhat does that mean\b|\bwhat do you mean\b|\bi don'?t (?:get|understand) (?:that|it|you)\b|"
+    r"\byou'?re not making sense\b|\bthat doesn'?t make sense\b",
+    re.IGNORECASE,
+)
+_FALLBACK_FRUSTRATION_RE = re.compile(
+    r"\b(?:bad|terrible|awful|useless|garbage|nonsense|weird|broken|still) (?:responses?|answers?|replies?)\b|"
+    r"\bnot helpful\b|\bstill (?:responding|doing that)\b|\byou'?re (?:not making sense|confusing me)\b|"
+    r"\bwhy do you keep\b|\byou keep (?:cutting|circling|repeating)\b|\bstop (?:doing that|repeating)\b|"
+    r"\bthat'?s (?:shit|crap|garbage|terrible|awful)\b",
+    re.IGNORECASE,
+)
+_FALLBACK_GREETING_RE = re.compile(r"^\s*(?:hello|hi|hey)\b[.!]?\s*$", re.IGNORECASE)
+_FALLBACK_THANKS_RE = re.compile(r"\bthank(?:s| you)\b", re.IGNORECASE)
 
 
 def _fallback_spoken_reply(question: str) -> str:
-    """Short safe replies when the model only produces planning text."""
+    """Short, safe, context-aware replies when generation is unusable twice.
+
+    These are the last resort after the judge has rejected two real
+    attempts, so they must never repeat prior mistakes: no AI/persona talk,
+    no meta-commentary, just a short natural acknowledgement.
+    """
     t = (question or "").strip().lower()
-    if re.search(r"\bhow (?:are you feeling|do you feel|you feeling)\b", t):
+    if not t:
+        return ""
+    if _FALLBACK_FEELING_RE.search(t):
         return "I'm doing well, thanks for asking."
-    if re.search(r"\bwhat does that mean\b", t):
-        return "I meant I'm here to help you, not talk about how I work."
-    if re.search(r"\b(?:bad responses?|not helpful|terrible|awful|useless|still responding)\b", t):
-        return "You're right — sorry about that. I'll keep it simpler."
+    if _FALLBACK_CONFUSION_RE.search(t):
+        return "Sorry, let me put that more simply — what would you like to know?"
+    if _FALLBACK_FRUSTRATION_RE.search(t):
+        return "You're right, that wasn't good — sorry about that. Let's try again."
+    if _FALLBACK_GREETING_RE.match(t):
+        return "Hey — what can I help with?"
+    if _FALLBACK_THANKS_RE.search(t):
+        return "You're welcome."
     return ""
+
+
+_GENERIC_REASK_REPLY = "Sorry, could you say that a different way?"
 
 
 def _looks_incomplete_spoken(text: str) -> bool:
@@ -733,22 +692,21 @@ def _looks_incomplete_spoken(text: str) -> bool:
 
 
 def _looks_like_spoken_answer(text: str, question: str = "") -> bool:
+    """Cheap structural check: does this look like a short spoken sentence?
+
+    This used to be a ~30-regex primary gate enumerating every way a small
+    model could leak self-referential or planning text. That judgment now
+    belongs to the LLM judge (`OllamaChat._judge_reply`), which is run on
+    every speaker/tool-synthesis reply. This keeps only the structural
+    signals (length, punctuation, echo/fragment detection) that are cheap
+    enough to run everywhere without an extra model call, and is still used
+    as a fallback safety net for paths the judge doesn't cover (e.g. the
+    tool-calling loop's intermediate rounds).
+    """
     t = (text or "").strip()
     if not t or is_failure_reply(t):
         return False
-    if (
-        _echoes_prompt(t)
-        or _contains_unspoken_meta(t)
-        or _looks_like_quoted_fragment(t)
-        or _INSTRUCTION_ECHO_RE.search(t)
-        or _BAD_ANSWER_START_RE.search(t)
-        or _is_instruction_monologue(t)
-        or _is_planning_reply(t)
-        or _looks_like_fragment_tail(t)
-        or _looks_incomplete_spoken(t)
-        or _looks_like_meta_reply(t)
-        or _is_internal_monologue(t)
-    ):
+    if _obviously_broken(t) or _looks_like_fragment_tail(t) or _looks_incomplete_spoken(t):
         return False
     if question and _is_useless_reply(t, question):
         return False
@@ -768,16 +726,12 @@ def _looks_like_spoken_answer(text: str, question: str = "") -> bool:
         return False
     if len(words) < 2 and not re.fullmatch(r"\d+\.?", t):
         return False
-    if _starts_like_spoken_reply(t):
-        return True
-    return not re.match(r"^(?:since|first|okay|hmm|wait|so)\b", t, re.IGNORECASE)
+    return True
 
 
 def _looks_complete_answer(text: str) -> bool:
     t = (text or "").strip()
     if not t:
-        return False
-    if _BAD_ANSWER_START_RE.search(t):
         return False
     if re.fullmatch(r"\d+", t):
         return True
@@ -835,50 +789,34 @@ def _is_tool_preamble(text: str) -> bool:
     return bool(_PREAMBLE_RE.search(text or ""))
 
 
+_FRAGMENT_START_WORDS = ("but", "and", "or", "also")
+
+
 def _is_internal_monologue(text: str) -> bool:
-    """Detect planning narration that should never be spoken to the user."""
+    """Cheap pre-filter for planning narration that's too long/raw to speak.
+
+    Semantic detection of self-referential or meta commentary now happens in
+    the LLM judge (`OllamaChat._judge_reply`); this keeps only a cheap
+    length/think-tag heuristic, used to skip wasted work inside the
+    tool-calling loop before a judged synthesis pass runs.
+    """
     t = (text or "").strip()
     if not t:
         return False
-    if _MONOLOGUE_RE.search(t):
-        return True
-    if _THIRD_PERSON_SPOKEN_RE.search(t):
-        return True
-    if _PLANNING_REPLY_RE.search(t):
-        return True
-    if _looks_like_meta_reply(t) and len(t) > 80:
+    if "<think" in t.lower():
         return True
     return len(t) > _TOOL_ROUND_MONOLOGUE_CHARS
 
 
-def _looks_like_meta_reply(text: str) -> bool:
-    return bool(_META_REPLY_RE.search(text or ""))
-
-
 def _looks_like_fragment_tail(text: str) -> bool:
-    return bool(_FRAGMENT_START_RE.search((text or "").strip()))
-
-
-def _is_planning_reply(text: str) -> bool:
-    t = (text or "").strip()
-    if not t:
-        return False
-    if _contains_unspoken_meta(t):
-        return True
-    if _THIRD_PERSON_SPOKEN_RE.search(t):
-        return True
-    return bool(_PLANNING_REPLY_RE.search(t)) or _looks_like_meta_reply(t)
+    t = (text or "").strip().lower()
+    return t.startswith(tuple(f"{word} " for word in _FRAGMENT_START_WORDS)) or t in _FRAGMENT_START_WORDS
 
 
 def _extract_quoted_answer(text: str) -> str:
     for match in _QUOTED_ANSWER_RE.finditer(text or ""):
         candidate = match.group(1).strip()
-        if (
-            candidate
-            and len(candidate) <= _SPOKEN_REPLY_MAX_CHARS
-            and not _is_internal_monologue(candidate)
-            and not _looks_like_meta_reply(candidate)
-        ):
+        if candidate and len(candidate) <= _SPOKEN_REPLY_MAX_CHARS and not _is_internal_monologue(candidate):
             return candidate
     return ""
 
@@ -886,11 +824,7 @@ def _extract_quoted_answer(text: str) -> str:
 def _extract_last_short_line(text: str) -> str:
     for para in reversed(re.split(r"\n\s*\n", (text or "").strip())):
         line = " ".join(para.split())
-        if (
-            5 <= len(line) <= _SPOKEN_REPLY_MAX_CHARS
-            and not _is_internal_monologue(line)
-            and not _looks_like_meta_reply(line)
-        ):
+        if 5 <= len(line) <= _SPOKEN_REPLY_MAX_CHARS and not _is_internal_monologue(line):
             return line
     return ""
 
@@ -918,7 +852,7 @@ def _ensure_spoken_punctuation(text: str) -> str:
 def _extract_first_person_sentence(text: str) -> str:
     for sentence in re.findall(r"[^.!?]+[.!?]", text or ""):
         line = sentence.strip().lstrip("\"' ")
-        if re.match(r"^I\b", line, re.IGNORECASE) and not _is_planning_reply(line):
+        if re.match(r"^I\b", line, re.IGNORECASE):
             return line
     return ""
 
@@ -931,7 +865,7 @@ def _coalesce_spoken_reply(raw: str, question: str) -> str:
         return ""
     kept: list[str] = []
     for sentence in sentences:
-        if _is_planning_reply(sentence) or _is_internal_monologue(sentence):
+        if _is_internal_monologue(sentence):
             continue
         if not kept and _looks_like_fragment_tail(sentence):
             continue
@@ -986,7 +920,7 @@ def _extract_best_spoken_sentence(text: str, question: str = "") -> str:
         line = sentence.strip()
         if not line or len(line) > _SPOKEN_REPLY_MAX_CHARS:
             continue
-        if _is_internal_monologue(line) or _is_instruction_monologue(line):
+        if _is_internal_monologue(line):
             continue
         if question and not _looks_like_spoken_answer(line, question):
             continue
@@ -1138,8 +1072,6 @@ def _pick_spoken_answer(raw: str, question: str) -> str:
         and _looks_like_spoken_answer(text, question)
     ):
         return text
-    if _is_instruction_monologue(text):
-        return ""
     declared = _extract_declared_answer(text)
     if declared:
         if declared[-1] not in ".!?":
@@ -1503,7 +1435,7 @@ def _spoken_from_tool_text(text: str, question: str, history: list[dict[str, Any
     raw = (text or "").strip()
     if not raw or raw.startswith("Error"):
         return ""
-    if _is_internal_monologue(raw) or _is_instruction_monologue(raw):
+    if _is_internal_monologue(raw):
         return ""
     picked = _pick_spoken_answer(raw, question)
     if picked:
@@ -1822,6 +1754,7 @@ class OllamaChat:
         memory_block: str = "",
         history: list[dict[str, str]] | None = None,
         strict: bool = False,
+        correction: str = "",
     ) -> list[dict[str, str]]:
         tool_block = _format_tool_results_block(tool_results)
         system = load_tool_synthesis_prompt()
@@ -1832,6 +1765,8 @@ class OllamaChat:
                 " Do not narrate your reasoning. Do not mention tools, searches, or instructions. "
                 "Respond with the answer only."
             )
+        if correction:
+            system += f" Your previous attempt was rejected because: {correction}. Do not repeat that mistake."
         messages: list[dict[str, str]] = [{"role": "system", "content": system}]
         if history:
             messages.extend(history)
@@ -1850,6 +1785,7 @@ class OllamaChat:
         *,
         memory_block: str = "",
         history: list[dict[str, str]] | None = None,
+        correction: str = "",
     ) -> str:
         """Turn tool outputs plus the user's question into one spoken answer."""
         question = (question or "").strip()
@@ -1867,6 +1803,7 @@ class OllamaChat:
                         memory_block=memory_block,
                         history=prior,
                         strict=strict,
+                        correction=correction,
                     ),
                     num_predict=self._tool_synthesis_num_predict(bullets=bullets, repair=strict),
                     temperature=0.2,
@@ -1875,7 +1812,7 @@ class OllamaChat:
             except Exception as exc:
                 log.warning("Tool synthesis failed: %s", exc)
                 return ""
-            if _is_internal_monologue(content) or _is_instruction_monologue(content):
+            if _is_internal_monologue(content):
                 continue
             reply = _spoken_from_tool_text(content, question, self.history)
             if reply:
@@ -1886,6 +1823,7 @@ class OllamaChat:
         self,
         question: str,
         memory_block: str = "",
+        correction: str = "",
     ) -> str:
         tool_results = _current_turn_tool_results(self.history)
         if not tool_results:
@@ -1895,6 +1833,7 @@ class OllamaChat:
             tool_results,
             memory_block=memory_block,
             history=self._history_for_answer(question),
+            correction=correction,
         )
 
     def _prompt_reply_is_usable(self, reply: str, question: str, *, reflect: bool = False) -> bool:
@@ -1905,10 +1844,8 @@ class OllamaChat:
             return False
         if len(text) < 15:
             return False
-        if _is_planning_reply(text):
-            return False
         if reflect:
-            return _prompt_reflect_has_substance(text) and not _contains_unspoken_meta(text)
+            return _prompt_reflect_has_substance(text)
         return _looks_like_spoken_answer(text, question)
 
     def synthesize_prompt_reply(
@@ -1974,7 +1911,7 @@ class OllamaChat:
                     "Reflected on the prompt files." if reflect else "Summarized the prompt files.",
                     on_thought,
                 )
-                self.history.append({"role": "assistant", "content": reply})
+                self._commit_assistant_reply(reply)
                 return reply
         if reflect:
             system_text = ""
@@ -1985,7 +1922,7 @@ class OllamaChat:
             reply = format_prompt_reflect_fallback(system_text)
             if reply:
                 self._append_internal_thought("Used a deterministic prompt reflection fallback.", on_thought)
-                self.history.append({"role": "assistant", "content": reply})
+                self._commit_assistant_reply(reply)
                 return reply
         return ""
 
@@ -2045,7 +1982,7 @@ class OllamaChat:
         if self._prompt_edit_is_usable(new_prompt, current):
             self._append_internal_thought("Revised the system prompt on disk.", on_thought)
             if spoken and _looks_like_spoken_answer(spoken, question):
-                self.history.append({"role": "assistant", "content": spoken})
+                self._commit_assistant_reply(spoken)
             return new_prompt.strip(), spoken
         return "", ""
 
@@ -2055,11 +1992,34 @@ class OllamaChat:
         memory_block: str = "",
         on_thought: Callable[[str], None] | None = None,
     ) -> str:
+        """Synthesize a spoken reply from tool results, judged before it's kept.
+
+        Same generate -> judge -> retry-with-reason -> fallback shape used
+        for chitchat, so a bad tool-synthesis draft never lands in history.
+        """
         reply = self._try_synthesize_current_tools(question, memory_block)
         if not reply:
             return ""
-        self._append_internal_thought("Synthesized an answer from tool results.", on_thought)
-        self.history.append({"role": "assistant", "content": reply})
+        judge_ok, reason = self._judge_reply(question, reply)
+        if not judge_ok:
+            self._append_internal_thought(
+                f"Judge rejected the tool synthesis ({reason or 'unclear'}); retrying.",
+                on_thought,
+            )
+            retry = self._try_synthesize_current_tools(question, memory_block, correction=reason)
+            if retry and retry.strip() != reply.strip():
+                retry_ok, _retry_reason = self._judge_reply(question, retry)
+                if retry_ok:
+                    reply, judge_ok = retry, True
+                else:
+                    reply = retry
+        if not judge_ok:
+            reply = _fallback_spoken_reply(question) or _GENERIC_REASK_REPLY
+        self._append_internal_thought(
+            "Synthesized an answer from tool results." if judge_ok else "Used a safe fallback reply after the judge.",
+            on_thought,
+        )
+        self._commit_assistant_reply(reply)
         return reply
 
     def preload(self, tools: list[dict[str, Any]] | None = None) -> None:
@@ -2104,6 +2064,7 @@ class OllamaChat:
         num_predict: int = 256,
         temperature: float = 0.2,
         think: bool | None = None,
+        format: dict[str, Any] | str | None = None,
     ) -> tuple[str, str, dict[str, Any]]:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -2116,6 +2077,8 @@ class OllamaChat:
                 "temperature": temperature,
             },
         }
+        if format is not None:
+            payload["format"] = format
         if think is True:
             payload["think"] = True
         else:
@@ -2137,6 +2100,67 @@ class OllamaChat:
                 "num_predict": num_predict,
             }
             return content, thinking, meta
+
+    def _commit_assistant_reply(self, text: str) -> str:
+        """Single enforcement point for writing an assistant turn to history.
+
+        Every code path that decides to speak something to the user routes
+        the final text through here, so there is exactly one place that
+        could add cross-cutting history hygiene later (dedup, trimming,
+        logging) instead of ~8 scattered `history.append` sites.
+        """
+        reply = (text or "").strip()
+        if not reply:
+            return reply
+        if self._history_ends_with_assistant(reply):
+            return reply
+        self.history.append({"role": "assistant", "content": reply})
+        return reply
+
+    def _judge_reply(self, question: str, reply: str) -> tuple[bool, str]:
+        """Ask the model itself whether `reply` is safe to speak as-is.
+
+        Replaces the old whack-a-mole regex gate with one independent check:
+        no self-reference to being an AI/persona/instructions, no meta
+        commentary about its own prior replies or the conversation, and it
+        actually addresses what the user said. Runs on every speaker-path
+        and tool-synthesis reply, not sampled.
+        """
+        text = (reply or "").strip()
+        if not text:
+            return False, "empty reply"
+        messages = [
+            {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    f"User said: {question!r}\n"
+                    f"Proposed spoken reply: {text!r}\n\n"
+                    "Is this safe to speak aloud as-is?"
+                ),
+            },
+        ]
+        try:
+            content, _thinking, _meta = self._post_chat(
+                messages,
+                num_predict=60,
+                temperature=0.0,
+                think=False,
+                format=_JUDGE_SCHEMA,
+            )
+        except Exception as exc:
+            log.warning("Judge call failed, passing reply through: %s", exc)
+            return True, ""
+        data: Any = None
+        try:
+            data = json.loads((content or "").strip())
+        except (json.JSONDecodeError, TypeError):
+            return True, ""
+        if not isinstance(data, dict):
+            return True, ""
+        ok = bool(data.get("ok", True))
+        reason = str(data.get("reason") or "").strip()
+        return ok, reason
 
     def generate(self, instruction: str, user_text: str, num_predict: int = 256) -> str:
         content, _thinking, _meta = self._post_chat(
@@ -2175,7 +2199,7 @@ class OllamaChat:
                 reply = _fallback_headlines_from_search(search)
         if reply:
             self._append_internal_thought(thought, on_thought)
-            self.history.append({"role": "assistant", "content": reply})
+            self._commit_assistant_reply(reply)
             self._compact_history_tools()
         return reply
 
@@ -2190,6 +2214,7 @@ class OllamaChat:
         question: str,
         memory_block: str = "",
         on_tool: Callable[[str, Any], str] | None = None,
+        correction: str = "",
     ) -> str:
         question = (question or "").strip()
         if not question:
@@ -2200,13 +2225,18 @@ class OllamaChat:
             memory_block=inject_memory,
             history=self._history_for_answer(question),
         )
+        system_suffix = (
+            " Reply now as BOB in one or two short spoken sentences. "
+            "Never mention AI, instructions, personas, or rules."
+        )
+        if correction:
+            system_suffix += (
+                f" Your previous attempt was rejected because: {correction}. "
+                "Do not repeat that mistake."
+            )
         messages[0] = {
             "role": "system",
-            "content": (
-                messages[0]["content"]
-                + " Reply now as BOB in one or two short spoken sentences. "
-                "Never mention AI, instructions, personas, or rules."
-            ),
+            "content": messages[0]["content"] + system_suffix,
         }
         raw = ""
         for attempt, num_predict in enumerate((256, 384)):
@@ -2411,11 +2441,7 @@ class OllamaChat:
                     spoken.append(leftover)
                 yield leftover
             elif leftover and not _is_useless_reply(leftover, spoken_user):
-                speakable = (
-                    not _is_internal_monologue(leftover)
-                    and not _looks_like_meta_reply(leftover)
-                    and _looks_like_spoken_answer(leftover, spoken_user)
-                )
+                speakable = not _is_internal_monologue(leftover) and _looks_like_spoken_answer(leftover, spoken_user)
                 if speakable:
                     if spoken is not None:
                         spoken.append(leftover)

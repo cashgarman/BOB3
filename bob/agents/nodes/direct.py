@@ -22,7 +22,7 @@ def direct_node(state: TurnState) -> dict[str, Any]:
         if reply:
             llm._append_internal_thought("Called get_current_time directly (skipped LLM).", on_thought)
             llm.history.append({"role": "tool", "tool_name": "get_current_time", "content": result})
-            llm.history.append({"role": "assistant", "content": reply})
+            llm._commit_assistant_reply(reply)
             return {
                 "draft": reply,
                 "spoken": reply,
@@ -35,7 +35,7 @@ def direct_node(state: TurnState) -> dict[str, Any]:
     direct = _try_direct_answer(user_text)
     if direct:
         llm._append_internal_thought("Answered directly.", on_thought)
-        llm.history.append({"role": "assistant", "content": direct})
+        llm._commit_assistant_reply(direct)
         return {"draft": direct, "spoken": direct, "chunks": [direct], "used_tools": False, "gate_ok": True}
 
     return {"draft": "", "gate_ok": False, "route": "speak"}

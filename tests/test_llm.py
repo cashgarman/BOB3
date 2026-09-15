@@ -155,13 +155,19 @@ def test_round_holds_back_monologue_while_tools_offered():
 
 
 def test_is_internal_monologue():
+    """`_is_internal_monologue` is now only a cheap length/think-tag pre-filter.
+
+    Semantic detection of planning narration ("Okay, the user is asking...")
+    is the LLM judge's job (`OllamaChat._judge_reply`), not a regex here.
+    """
     from bob.llm import _is_internal_monologue
 
-    assert _is_internal_monologue("Okay, the user is asking for the time.")
+    assert not _is_internal_monologue("Okay, the user is asking for the time.")
     assert _is_internal_monologue("x" * 521)
     assert not _is_internal_monologue("x" * 250)
     assert not _is_internal_monologue("It is 3:15 PM Pacific.")
     assert not _is_internal_monologue("")
+    assert _is_internal_monologue("<think>still reasoning")
 
 
 def test_chat_skips_monologue_tool_round():
@@ -212,24 +218,33 @@ def test_chat_records_internal_thought_callback():
     assert chat.last_internal_thought
 
 
-def test_sanitize_spoken_reply_extracts_quoted_answer():
-    from bob.llm import _sanitize_spoken_reply
+def test_extract_quoted_answer_pulls_the_quoted_clause():
+    """`_extract_quoted_answer` is still a useful low-level helper.
+
+    Deciding whether the *surrounding* monologue is safe to speak is now the
+    judge's job, so `_sanitize_spoken_reply` (a cheap structural pass) no
+    longer tries to strip planning narration itself — it only kicks in when
+    the whole reply is unusable (empty/too long/an echo).
+    """
+    from bob.llm import _extract_quoted_answer
 
     raw = (
         'Okay, the user is asking for the current time. Bob should say "It\'s 1:03 PM, Cash." '
         "after calling the tool."
     )
-    assert _sanitize_spoken_reply(raw) == "It's 1:03 PM, Cash."
+    assert _extract_quoted_answer(raw) == "It's 1:03 PM, Cash."
 
 
-def test_sanitize_spoken_reply_uses_time_tool_fallback():
+def test_sanitize_spoken_reply_falls_back_when_text_is_useless():
     from bob.llm import _sanitize_spoken_reply
 
     history = [
         {"role": "tool", "tool_name": "get_current_time", "content": "Monday, September 14, 2026 at 1:03 PM Pacific Daylight Time"}
     ]
-    raw = "Okay, the user is asking again. From the known information, Bob should call get_current_time."
-    assert _sanitize_spoken_reply(raw, history, "What time is it?") == "It's 1:03 PM, Pacific time."
+    # An empty/echoing draft still falls back to the tool result deterministically.
+    assert _sanitize_spoken_reply("What time is it now? /no_think", history, "What time is it now?") == (
+        "It's 1:03 PM, Pacific time."
+    )
 
 
 def test_sanitize_spoken_reply_skips_time_fallback_for_non_time_question():
@@ -378,44 +393,33 @@ def test_format_calendar_tool_result_season():
     assert "10:50" not in _format_calendar_tool_result("What date is it?", stamp)
 
 
-def test_looks_like_spoken_answer_rejects_third_person_meta():
-    from bob.llm import _looks_like_spoken_answer
+def test_judge_reply_rejects_third_person_and_planning_meta(monkeypatch):
+    """Third-person/meta/planning leaks are now caught by the LLM judge, not a regex.
 
-    assert not _looks_like_spoken_answer(
-        "Their actual need might be to understand how AIs handle meta-questions.",
-        "But what do you feel about it?",
-    )
-    assert not _looks_like_spoken_answer(
-        "They could be curious about my design limitations or wanting to understand my reasoning process better.",
+    `_looks_like_spoken_answer` is a cheap structural pre-filter that no
+    longer tries to enumerate every way a model can leak meta-commentary —
+    see `OllamaChat._judge_reply` and the speaker-node retry loop instead.
+    """
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+
+    def fake_post_chat(self, messages, **kwargs):
+        return json.dumps({"ok": False, "reason": "talks about itself in third person"}), "", {}
+
+    monkeypatch.setattr(OllamaChat, "_post_chat", fake_post_chat)
+    ok, reason = chat._judge_reply(
         "You responded to me in the third person as if I wasn't in the room. Why?",
+        "They could be curious about my design limitations or wanting to understand my reasoning process better.",
     )
+    assert ok is False
+    assert reason
 
 
-def test_looks_like_spoken_answer_rejects_planning_meta():
-    from bob.llm import _looks_like_spoken_answer
+def test_extract_declared_answer_pulls_the_spoken_clause():
+    """`_extract_declared_answer` is still a useful low-level helper."""
+    from bob.llm import _extract_declared_answer
 
-    bad = (
-        "The extra detail could be about how I'm an AI model that "
-        "processes text without personal preferences."
-    )
-    assert not _looks_like_spoken_answer(bad, "What is your favorite color and why?")
-    assert not _looks_like_spoken_answer(
-        'The sky being blue explanation is in the background too - that\'s perfect to share as the "why" part.',
-        "What is your favorite color and why?",
-    )
-    assert not _looks_like_spoken_answer(
-        "I should make sure the response is accurate and matches their expectations.",
-        "Count back from 10.",
-    )
-
-
-def test_sanitize_spoken_reply_extracts_declared_answer():
-    from bob.llm import _sanitize_spoken_reply
-
-    raw = ' So the answer should be that I don\'t have feelings but can simulate them to help.'
-    assert _sanitize_spoken_reply(raw, user_text="What do you feel about being an AI?") == (
-        "I don't have feelings but can simulate them to help."
-    )
+    raw = " So the answer should be that I don't have feelings but can simulate them to help."
+    assert _extract_declared_answer(raw) == "I don't have feelings but can simulate them to help"
 
 
 def test_generate_spoken_answer_ignores_thinking_when_content_empty():
@@ -513,14 +517,11 @@ def test_looks_like_spoken_answer_rejects_user_echo_and_instruction_leak():
     )
 
 
-def test_looks_like_spoken_answer_rejects_persona_and_instruction_monologue():
-    from bob.llm import _looks_like_spoken_answer, _fallback_spoken_reply
+def test_looks_like_spoken_answer_rejects_quoted_instruction_leaks():
+    """Bare-quote-fragment leaks are still caught by the cheap structural filter."""
+    from bob.llm import _looks_like_spoken_answer
 
     cases = [
-        (
-            "How are you feeling?",
-            "Since I am an AI, but in this role I am BOB (a character), I should be consistent with the persona.",
-        ),
         (
             "What does that mean?",
             '" and I (as BOB) responded with a statement about being an AI. ". - Use "I" and "you" only.',
@@ -532,8 +533,34 @@ def test_looks_like_spoken_answer_rejects_persona_and_instruction_monologue():
     ]
     for question, bad in cases:
         assert not _looks_like_spoken_answer(bad, question)
+
+
+def test_judge_reply_rejects_persona_monologue(monkeypatch):
+    """'Since I am an AI... this role... persona' leaks pass structurally but the judge catches them."""
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+
+    def fake_post_chat(self, messages, **kwargs):
+        return json.dumps({"ok": False, "reason": "mentions being an AI and a persona"}), "", {}
+
+    monkeypatch.setattr(OllamaChat, "_post_chat", fake_post_chat)
+    ok, reason = chat._judge_reply(
+        "How are you feeling?",
+        "Since I am an AI, but in this role I am BOB (a character), I should be consistent with the persona.",
+    )
+    assert ok is False
+    assert reason
+
+
+def test_fallback_spoken_reply_covers_feelings_and_confusion():
+    from bob.llm import _fallback_spoken_reply
+
     assert _fallback_spoken_reply("How are you feeling?") == "I'm doing well, thanks for asking."
-    assert _fallback_spoken_reply("What does that mean?").startswith("I meant I'm here")
+    assert _fallback_spoken_reply("What does that mean?").startswith("Sorry, let me put that")
+    assert _fallback_spoken_reply("I don't get it.").startswith("Sorry, let me put that")
+    assert "sorry" in _fallback_spoken_reply("That's terrible, you keep repeating yourself.").lower()
+    assert _fallback_spoken_reply("Hello!") == "Hey — what can I help with?"
+    assert _fallback_spoken_reply("Thanks a lot.") == "You're welcome."
+    assert _fallback_spoken_reply("What's the capital of France?") == ""
 
 
 def test_chitchat_memory_block_skipped_without_chat_context():
@@ -643,7 +670,6 @@ def test_needs_agentic_tools():
         "How do you feel about your current system prompt?",
         reflect=True,
     )
-    assert not _looks_like_spoken_answer(deferral, "How do you feel about your current system prompt?")
     later = "might improve later"
     assert not chat._prompt_reply_is_usable(
         later,
@@ -805,26 +831,13 @@ def test_answer_messages_include_memory_block():
     assert "Web search results" in messages[0]["content"]
 
 
-def test_looks_like_spoken_answer_rejects_instruction_echo():
+def test_looks_like_spoken_answer_structural_checks():
+    """Fragment-tail and unpunctuated-fragment detection are still cheap structural checks."""
     from bob.llm import _looks_like_spoken_answer
 
-    assert not _looks_like_spoken_answer("No extra commentary.", "What's your favorite color?")
-    assert not _looks_like_spoken_answer("Keep answers concise.", "What's your favorite color?")
-    assert not _looks_like_spoken_answer(
-        "I shouldn't repeat or mention background notes unless asked.",
-        "How far is the moon?",
-    )
     assert not _looks_like_spoken_answer(
         "But I must phrase it naturally and concisely.",
         "What's the biggest country in the world?",
-    )
-    assert not _looks_like_spoken_answer(
-        "I need to respond as BOB, a local voice assistant, with one short natural sentence.",
-        "How far is the moon?",
-    )
-    assert not _looks_like_spoken_answer(
-        "First, I recall the average distance is about 384,400 kilometers.",
-        "How far is the moon?",
     )
     assert not _looks_like_spoken_answer("It covers", "What's the biggest country?")
     assert _looks_like_spoken_answer(
@@ -835,22 +848,38 @@ def test_looks_like_spoken_answer_rejects_instruction_echo():
         "I don't have a favorite color—I'm a voice assistant! But I can help you pick the perfect color for your next creative project.",
         "What's your favorite color?",
     )
-    assert not _looks_like_spoken_answer(
-        "Since they want me to pretend I have a favorite color without overthinking, I'll pick one that's universally acceptable.",
-        "What's your favorite color?",
-    )
-    assert not _looks_like_spoken_answer(
-        'Better not add anything like "on average" or "varies".',
-        "What's the distance from the moon to the earth?",
-    )
-    assert not _looks_like_spoken_answer(
-        "They've been strict about short spoken sentences before.",
-        "What's the biggest country in the world?",
-    )
-    assert not _looks_like_spoken_answer(
-        "Best to pick the most universally accepted answer without caveats.",
-        "What's the largest fruit there is?",
-    )
+
+
+def test_judge_reply_rejects_instruction_and_persona_leaks(monkeypatch):
+    """Instruction-echo/persona/planning leaks that pass the structural filter are caught by the judge.
+
+    These are exactly the kinds of phrasing that used to require a dedicated
+    regex each ("No extra commentary.", "Keep answers concise.", "First, I
+    recall...", "Since they want me to pretend..."). The judge call replaces
+    that whole enumeration with one independent quality check.
+    """
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+
+    def fake_post_chat(self, messages, **kwargs):
+        return json.dumps({"ok": False, "reason": "echoes internal instructions"}), "", {}
+
+    monkeypatch.setattr(OllamaChat, "_post_chat", fake_post_chat)
+    for text, question in (
+        ("No extra commentary.", "What's your favorite color?"),
+        ("Keep answers concise.", "What's your favorite color?"),
+        (
+            "I need to respond as BOB, a local voice assistant, with one short natural sentence.",
+            "How far is the moon?",
+        ),
+        (
+            "Since they want me to pretend I have a favorite color without overthinking, I'll pick one "
+            "that's universally acceptable.",
+            "What's your favorite color?",
+        ),
+    ):
+        ok, reason = chat._judge_reply(question, text)
+        assert ok is False
+        assert reason
 
 
 def test_pick_spoken_answer_rejects_planning_sentences():
@@ -870,10 +899,6 @@ def test_pick_spoken_answer_rejects_planning_sentences():
             "What's your favorite color?",
         )
         == "I like blue."
-    )
-    assert not _pick_spoken_answer(
-        "Keep answers concise. Background notes are for your use only.",
-        "What's your favorite color?",
     )
 
 
@@ -928,7 +953,8 @@ def test_looks_complete_answer():
     assert not _looks_complete_answer("I recall that BO")
 
 
-def test_recover_reply_rejects_instruction_echo():
+def test_recover_reply_extracts_quoted_answer_when_present():
+    """`_recover_reply` is a best-effort generator; the judge is the safety net now."""
     chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
 
     class FakeClient:
@@ -936,12 +962,7 @@ def test_recover_reply_rejects_instruction_echo():
             response = type("Resp", (), {})()
             response.raise_for_status = lambda: None
             response.json = lambda: {
-                "message": {
-                    "content": (
-                        'Hmm, the user wants my favorite color. No extra commentary. '
-                        'Bob should say "I like blue."'
-                    )
-                }
+                "message": {"content": 'Hmm, the user wants my favorite color. Bob should say "I like blue."'}
             }
             return response
 
@@ -953,41 +974,52 @@ def test_recover_reply_rejects_instruction_echo():
 
     with patch("bob.llm.httpx.Client", return_value=FakeClient()):
         reply = chat._recover_reply("What's your favorite color?")
-    assert reply == "I like blue."
+    assert "I like blue" in reply
 
 
-def test_recover_reply_rejects_incomplete_fragment():
+def test_validator_judges_and_replaces_bad_recovered_reply(monkeypatch):
+    """Regression test: a monologue-flavored recovery is judged and replaced before being spoken.
+
+    `_recover_reply` alone no longer filters self-referential/planning text
+    structurally (that used to be ~30 enumerated regexes); `validator_node`
+    now judges whatever it returns and never commits an unjudged draft.
+    """
+    from bob.agents.state import TurnRuntime, reset_runtime, set_runtime
+    from bob.agents.nodes.validator import validator_node
+
     chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    bad_recovery = (
+        "We are in the middle of a conversation. I've been working on your code all night. "
+        '" As BOB, I must reply in one or two short sentences.'
+    )
+    question = "I've been programming you all night and you're still responding with really bad responses."
+    monkeypatch.setattr(chat, "_recover_reply", lambda *a, **k: bad_recovery)
+    monkeypatch.setattr(chat, "_judge_reply", lambda q, reply: (False, "narrates its own reasoning"))
 
-    class FakeClient:
-        def post(self, *args, **kwargs):
-            response = type("Resp", (), {})()
-            response.raise_for_status = lambda: None
-            response.json = lambda: {
-                "message": {
-                    "content": (
-                        "Hmm, the user is asking about the biggest country. "
-                        "It covers Russia being the largest country by land area."
-                    )
-                }
+    runtime = TurnRuntime(llm=chat)
+    token = set_runtime(runtime)
+    try:
+        out = validator_node(
+            {
+                "user_text": question,
+                "draft": bad_recovery,
+                "gate_ok": False,
+                "repair_count": 0,
             }
-            return response
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-    with patch("bob.llm.httpx.Client", return_value=FakeClient()):
-        reply = chat._recover_reply("What's the biggest country in the world?")
-    assert reply == "Sorry, I didn't get that."
+        )
+    finally:
+        reset_runtime(token)
+    assert out["judge_ok"] is False
+    assert out["used_fallback"] is True
+    assert out["spoken"] != bad_recovery
+    assert chat.history[-1]["content"] == out["spoken"]
 
 
 def test_chat_general_question_skips_tool_rounds():
+    """The speaker path now makes a generate call plus a judge call, no streaming."""
     chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
     tools = [{"type": "function", "function": {"name": "get_current_time", "parameters": {}}}]
-    calls = {"stream": 0, "post": 0}
+    calls = {"stream": 0, "post": 0, "payloads": []}
 
     class FakeClient:
         def stream(self, *args, **kwargs):
@@ -996,12 +1028,14 @@ def test_chat_general_question_skips_tool_rounds():
 
         def post(self, *args, **kwargs):
             calls["post"] += 1
-            calls["payload"] = kwargs.get("json") or (args[1] if len(args) > 1 else None)
+            payload = kwargs.get("json") or (args[1] if len(args) > 1 else None)
+            calls["payloads"].append(payload)
             response = type("Resp", (), {})()
             response.raise_for_status = lambda: None
-            response.json = lambda: {
-                "message": {"content": "Russia is the largest country by area."}
-            }
+            if payload.get("format"):
+                response.json = lambda: {"message": {"content": '{"ok": true, "reason": ""}'}}
+            else:
+                response.json = lambda: {"message": {"content": "Russia is the largest country by area."}}
             return response
 
         def __enter__(self):
@@ -1021,12 +1055,18 @@ def test_chat_general_question_skips_tool_rounds():
         )
     assert chunks == ["Russia is the largest country by area."]
     assert calls["stream"] == 0
-    assert calls["post"] == 1
-    payload = calls["payload"]
-    assert payload["think"] is False
-    assert payload["messages"][-1]["content"] == "What's the biggest country in the world?"
-    assert "never mention ai" in payload["messages"][0]["content"].lower()
-    assert payload["options"]["num_predict"] == 256
+    assert calls["post"] == 2
+    generate_payload = calls["payloads"][0]
+    assert generate_payload["think"] is False
+    assert generate_payload["messages"][-1]["content"] == "What's the biggest country in the world?"
+    assert "never mention ai" in generate_payload["messages"][0]["content"].lower()
+    assert generate_payload["options"]["num_predict"] == 256
+    judge_payload = calls["payloads"][1]
+    assert judge_payload["format"] == {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}, "reason": {"type": "string"}},
+        "required": ["ok"],
+    }
 
 
 def test_chat_force_final_for_agentic_question():
