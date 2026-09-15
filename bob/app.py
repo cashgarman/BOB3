@@ -88,6 +88,9 @@ class Assistant:
         self._state_detail = ""
         self._last_toggle = 0.0
         self._models_cache: tuple[float, list[tuple[str, bool]]] = (0.0, [])
+        self._model_pull_dialog = None
+        self._model_pull_target: str | None = None
+        self._model_pull_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._pipeline_thread: threading.Thread | None = None
         self._chunk_q: queue.Queue = queue.Queue(maxsize=64)
@@ -389,7 +392,189 @@ class Assistant:
         self._models_cache = (time.monotonic(), out)
         return out
 
+    def _llm_model_names(self) -> list[str]:
+        """Local Ollama models plus catalog entries for settings menus."""
+        from bob.llm_recommend import CATALOG
+
+        names: list[str] = []
+        seen: set[str] = set()
+        for name, _ in self._tray_models():
+            if name not in seen:
+                names.append(name)
+                seen.add(name)
+        for choice in CATALOG:
+            if choice.name not in seen:
+                names.append(choice.name)
+                seen.add(choice.name)
+        current = (self.settings.llm_model or "").strip()
+        if current and current not in seen:
+            names.insert(0, current)
+        return names
+
+    def _llm_menu_items(self) -> list[tuple[str, bool, str]]:
+        """Tray LLM menu rows: (model name, too large for GPU, label)."""
+        from bob.llm_recommend import CATALOG
+
+        items: list[tuple[str, bool, str]] = []
+        seen: set[str] = set()
+        for name, large in self._tray_models():
+            items.append((name, large, name))
+            seen.add(name)
+        for choice in CATALOG:
+            if choice.name in seen:
+                continue
+            large = choice.min_gpu_mb > 10240
+            label = f"{choice.name}  (download)"
+            if large:
+                label = f"{choice.name}  (download, too big for 10GB)"
+            items.append((choice.name, large, label))
+            seen.add(choice.name)
+        current = (self.settings.llm_model or "").strip()
+        if current and current not in seen:
+            items.insert(0, (current, False, current))
+        return items
+
+    def _refresh_settings_models(self) -> None:
+        win = self._settings_win
+        if win is None:
+            return
+        try:
+            if not win.winfo_exists():
+                self._settings_win = None
+                return
+            win.refresh_llm_models(self._llm_model_names())
+        except Exception:
+            pass
+
+    def _set_llm_model(self, model: str) -> None:
+        name = (model or "").strip()
+        if not name:
+            return
+        if name == self.settings.llm_model and name == self.llm.model:
+            if self.tray:
+                self.tray.refresh()
+            self._refresh_settings_models()
+            return
+
+        host = self.settings.ollama_host.rstrip("/")
+
+        def work() -> None:
+            from bob.ollama_pull import has_model
+
+            if has_model(host, name):
+                self._commit_llm_model(name)
+            else:
+                self._start_model_pull(name)
+
+        threading.Thread(target=work, name="llm-check", daemon=True).start()
+
+    def _commit_llm_model(self, model: str) -> None:
+        name = (model or "").strip()
+        if not name:
+            return
+        self.settings.update(llm_model=name)
+        self.llm.model = name
+        self.llm.reset_tools_support()
+        self._models_cache = (0.0, [])
+
+        def refresh() -> None:
+            if self.tray:
+                self.tray.refresh()
+            self._refresh_settings_models()
+
+        self._ui(refresh)
+        threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
+
+    def _start_model_pull(self, model: str) -> None:
+        with self._model_pull_lock:
+            if self._model_pull_target == model:
+                return
+            self._model_pull_target = model
+
+        def begin() -> None:
+            from bob.ui.model_download_dialog import ModelDownloadDialog
+
+            host = self.root or self.overlay
+            if host is None:
+                with self._model_pull_lock:
+                    self._model_pull_target = None
+                self._surface_note(f"Cannot download {model}: UI is not ready.")
+                return
+
+            if self._model_pull_dialog is not None:
+                try:
+                    if self._model_pull_dialog.winfo_exists():
+                        self._model_pull_dialog.focus()
+                        return
+                except Exception:
+                    self._model_pull_dialog = None
+
+            self._model_pull_dialog = ModelDownloadDialog(host, model)
+
+            def on_progress(completed: int | None, total: int | None, status: str) -> None:
+                dlg = self._model_pull_dialog
+                if dlg is None:
+                    return
+
+                def update() -> None:
+                    try:
+                        if dlg.winfo_exists():
+                            dlg.update_progress(completed, total, status)
+                    except Exception:
+                        pass
+
+                self._ui(update)
+
+            def work() -> None:
+                from bob.ollama_pull import pull_model
+
+                host_url = self.settings.ollama_host.rstrip("/")
+                try:
+                    pull_model(host_url, model, on_progress=on_progress)
+                except Exception as exc:
+                    log.warning("Model download failed: %s", exc)
+
+                    def fail() -> None:
+                        dlg = self._model_pull_dialog
+                        if dlg is not None:
+                            try:
+                                if dlg.winfo_exists():
+                                    dlg.set_error(str(exc) or "Download failed.")
+                            except Exception:
+                                pass
+                        self._surface_note(f"Could not download {model}: {exc}")
+                        with self._model_pull_lock:
+                            self._model_pull_target = None
+                        if self.tray:
+                            self.tray.refresh()
+                        self._refresh_settings_models()
+
+                    self._ui(fail)
+                    return
+
+                def ok() -> None:
+                    dlg = self._model_pull_dialog
+                    if dlg is not None:
+                        try:
+                            if dlg.winfo_exists():
+                                dlg.close()
+                        except Exception:
+                            pass
+                    self._model_pull_dialog = None
+                    with self._model_pull_lock:
+                        self._model_pull_target = None
+                    self._commit_llm_model(model)
+
+                self._ui(ok)
+
+            threading.Thread(target=work, name="llm-pull", daemon=True).start()
+
+        self._ui(begin)
+
     def apply_setting(self, field: str, value) -> None:
+        if field == "llm_model":
+            self._set_llm_model(str(value))
+            return
         if field in RESTART_FIELDS and str(getattr(self.settings, field)) != str(value):
             self.settings.update(**{field: value})
             self._surface_note("Saved. Restart BOB to apply this setting.")
@@ -411,13 +596,18 @@ class Assistant:
                 values["max_silence_sec"] = ms / 1000.0
             else:
                 values["max_silence_sec"] = 0.0
+        pending_llm_model = None
+        if "llm_model" in values:
+            new_model = str(values["llm_model"] or "").strip()
+            if new_model and new_model != self.settings.llm_model:
+                pending_llm_model = new_model
+                values = {k: v for k, v in values.items() if k != "llm_model"}
         restart = any(str(getattr(self.settings, k, None)) != str(v) for k, v in values.items() if k in RESTART_FIELDS)
         devices_changed = any(
             str(getattr(self.settings, k, "") or "") != str(values.get(k, "") or "")
             for k in ("input_device", "output_device")
             if k in values
         )
-        model_changed = str(values.get("llm_model", self.settings.llm_model)) != self.settings.llm_model
         old_theme = self.settings.theme
         self.settings.update(**values)
         if "theme" in values and str(values["theme"]) != str(old_theme) and "theme_overrides" not in values:
@@ -425,9 +615,6 @@ class Assistant:
         if "theme" in values or "theme_overrides" in values:
             self.apply_theme(theming.resolve_theme(self.settings))
         self.llm.host = self.settings.ollama_host.rstrip("/")
-        if str(values.get("llm_model", self.llm.model)) != self.llm.model:
-            self.llm.reset_tools_support()
-        self.llm.model = self.settings.llm_model
         self.llm.num_ctx = self.settings.llm_num_ctx
         if "system_prompt" in values:
             save_system_prompt(self.settings.system_prompt)
@@ -454,8 +641,8 @@ class Assistant:
             # Reopening the mic mid-turn drops the listen buffer, so only do it
             # when a device actually changed.
             self._restart_audio()
-        if model_changed:
-            threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
+        if pending_llm_model:
+            self._set_llm_model(pending_llm_model)
         if restart:
             self._surface_note("Some settings need a BOB restart (STT / sample rate).")
         if self.tray:
@@ -463,9 +650,7 @@ class Assistant:
 
     def _apply_live(self, field: str, value) -> None:
         if field == "llm_model":
-            self.llm.model = value
-            self.llm.reset_tools_support()
-            threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
+            self._set_llm_model(str(value))
         elif field == "llm_num_ctx":
             self.llm.num_ctx = int(value)
         elif field == "system_prompt":
@@ -560,7 +745,7 @@ class Assistant:
                     return
                 except Exception:
                     self._settings_win = None
-            models = [name for name, _ in self._tray_models()]
+            models = self._llm_model_names()
             self._settings_win = SettingsDialog(
                 self.root,
                 self.settings,

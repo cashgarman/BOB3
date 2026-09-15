@@ -35,10 +35,9 @@ _MONOLOGUE_RE = re.compile(
 _META_REPLY_RE = re.compile(
     r"\b(should say|should respond|should call|needs to call|the user|the tool|bob should|"
     r"the answer should be|answer should be|i should make sure|should make sure|"
-    r"main point is|key here is|extra detail could be|without personal preferences|"
+    r"main point is|key here is|"
     r"in the background|perfect to share|matches their expectations|"
     r"explanation is in the background|share as the|"
-    r"i(?:['’]ll| will)|better not|best to|"
     r"they(?:['’]ve| have) been|without overthinking|without caveats|"
     r"universally (?:acceptable|accepted)|pretend i|overthinking|no_think)\b",
     re.IGNORECASE,
@@ -46,10 +45,17 @@ _META_REPLY_RE = re.compile(
 _PLANNING_REPLY_RE = re.compile(
     r"\b(the answer should be|answer should be|i should make sure|should make sure|"
     r"in the background|perfect to share|that's perfect to|matches their expectations|"
+    r"their actual need|they could be|they might be|deeper need might be|"
     r"explanation is in the background|share as the|for your use only|"
-    r"background too|planned the reply|meant to be heard)\b",
+    r"background too|planned the reply|meant to be heard|design limitations|"
+    r"reasoning process)\b",
     re.IGNORECASE,
 )
+_THIRD_PERSON_SPOKEN_RE = re.compile(
+    r"^(?:they|their|the user)\b",
+    re.IGNORECASE,
+)
+_FRAGMENT_START_RE = re.compile(r"^(?:but|and|or|also)\b", re.IGNORECASE)
 _QUOTED_ANSWER_RE = re.compile(r'"([^"\n]{5,160})"')
 _TIME_TOOL_RE = re.compile(
     r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s.+?\s+at\s+"
@@ -160,6 +166,9 @@ def needs_chat_context(user_text: str) -> bool:
         "you didn't",
         "you didnt",
         "you gave me",
+        "last question",
+        "last thing i asked",
+        "previous question",
         "wrong answer",
         "that's wrong",
         "thats wrong",
@@ -332,6 +341,7 @@ def _looks_like_spoken_answer(text: str, question: str = "") -> bool:
         or _BAD_ANSWER_START_RE.search(t)
         or _is_instruction_monologue(t)
         or _is_planning_reply(t)
+        or _looks_like_fragment_tail(t)
         or _looks_incomplete_spoken(t)
     ):
         return False
@@ -344,6 +354,9 @@ def _looks_like_spoken_answer(text: str, question: str = "") -> bool:
     if _is_internal_monologue(t):
         return False
     max_chars = _spoken_max_chars(question)
+    if re.match(r"^I(?:['’]m| am| don'?t| do not| can(?:not|'t)?| would| like| think| feel)\b", t, re.IGNORECASE):
+        if t[-1] in ".!?" and len(t) <= max_chars and not _is_planning_reply(t):
+            return True
     if _user_wants_bullets(question) and _looks_like_bullet_list(t) and len(t) <= max_chars:
         return True
     if t[-1] in ".!?" and len(t) <= max_chars:
@@ -411,7 +424,11 @@ def _is_internal_monologue(text: str) -> bool:
         return False
     if _MONOLOGUE_RE.search(t):
         return True
-    if _META_REPLY_RE.search(t) and len(t) > 80:
+    if _THIRD_PERSON_SPOKEN_RE.search(t):
+        return True
+    if _PLANNING_REPLY_RE.search(t):
+        return True
+    if _looks_like_meta_reply(t) and len(t) > 80:
         return True
     return len(t) > _TOOL_ROUND_MONOLOGUE_CHARS
 
@@ -420,8 +437,17 @@ def _looks_like_meta_reply(text: str) -> bool:
     return bool(_META_REPLY_RE.search(text or ""))
 
 
+def _looks_like_fragment_tail(text: str) -> bool:
+    return bool(_FRAGMENT_START_RE.search((text or "").strip()))
+
+
 def _is_planning_reply(text: str) -> bool:
-    return bool(_PLANNING_REPLY_RE.search(text or "")) or _looks_like_meta_reply(text)
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _THIRD_PERSON_SPOKEN_RE.search(t):
+        return True
+    return bool(_PLANNING_REPLY_RE.search(t)) or _looks_like_meta_reply(t)
 
 
 def _extract_quoted_answer(text: str) -> str:
@@ -460,6 +486,72 @@ def _extract_declared_answer(text: str) -> str:
         return ""
     answer = match.group(1).strip().strip('"').strip("'")
     return answer.rstrip(".,; ")
+
+
+def _ensure_spoken_punctuation(text: str) -> str:
+    t = (text or "").strip()
+    if not t or t[-1] in ".!?" or _looks_like_bullet_list(t) or re.fullmatch(r"\d+", t):
+        return t
+    return f"{t}."
+
+
+def _extract_first_person_sentence(text: str) -> str:
+    for sentence in re.findall(r"[^.!?]+[.!?]", text or ""):
+        line = sentence.strip().lstrip("\"' ")
+        if re.match(r"^I\b", line, re.IGNORECASE) and not _is_planning_reply(line):
+            return line
+    return ""
+
+
+def _coalesce_spoken_reply(raw: str, question: str) -> str:
+    """Join consecutive spoken sentences instead of keeping a trailing fragment."""
+    text = re.sub(r"\s+", " ", _strip_control_tokens(_strip_think_blocks(raw or "")).strip())
+    sentences = [part.strip() for part in re.findall(r"[^.!?]+[.!?]", text) if part.strip()]
+    if not sentences:
+        return ""
+    kept: list[str] = []
+    for sentence in sentences:
+        if _is_planning_reply(sentence) or _is_internal_monologue(sentence):
+            continue
+        if not kept and _looks_like_fragment_tail(sentence):
+            continue
+        kept.append(sentence)
+        if len(kept) >= 3:
+            break
+    if not kept:
+        return ""
+    combined = " ".join(kept).strip()
+    if _looks_like_spoken_answer(combined, question):
+        return combined
+    return ""
+
+
+def _spoken_answer_candidates(raw: str, question: str) -> list[str]:
+    text = _strip_control_tokens(_strip_think_blocks(raw or "")).strip()
+    if not text:
+        return []
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for candidate in (
+        _coalesce_spoken_reply(text, question),
+        re.sub(r"\s+", " ", text).strip(),
+        _extract_first_person_sentence(text),
+        _extract_declared_answer(text),
+        _extract_quoted_answer(text),
+        _extract_best_spoken_sentence(text, question),
+        _extract_last_short_line(text),
+    ):
+        item = (candidate or "").strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    for sentence in reversed(re.findall(r"[^.!?]+[.!?]", text)):
+        item = sentence.strip().lstrip("\"' ")
+        if item and item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    return ordered
 
 
 def _extract_best_spoken_sentence(text: str, question: str = "") -> str:
@@ -597,21 +689,21 @@ def _compose_internal_thought(
 ) -> str:
     parts: list[str] = []
     thinking = _strip_control_tokens(_strip_think_blocks(thinking_field or "")).strip()
-    if thinking:
-        parts.append(thinking)
     raw = _strip_control_tokens(_strip_think_blocks(raw_content or "")).strip()
     spoken = _strip_control_tokens(_strip_think_blocks(spoken_content or "")).strip()
-    if raw:
-        if spoken and raw == spoken:
-            pass
-        elif spoken_user and _is_useless_reply(raw, spoken_user):
-            if not thinking:
-                parts.append("Evaluated the prompt internally (echo suppressed).")
-        elif _is_internal_monologue(raw) or (spoken and raw != spoken):
-            if raw not in parts:
-                parts.append("Planned the reply internally.")
-        elif not spoken:
-            parts.append(raw)
+    if thinking or (
+        raw
+        and (
+            _is_internal_monologue(raw)
+            or (spoken and raw != spoken)
+            or (not spoken and not _looks_like_spoken_answer(raw, spoken_user))
+        )
+    ):
+        parts.append("Planned the reply internally.")
+    elif raw and spoken and raw == spoken and _looks_like_spoken_answer(raw, spoken_user):
+        parts.append(raw)
+    elif spoken_user and raw and _is_useless_reply(raw, spoken_user):
+        parts.append("Evaluated the prompt internally (echo suppressed).")
     return "\n\n".join(part for part in parts if part).strip()
 
 
@@ -1515,6 +1607,12 @@ class OllamaChat:
             self._compact_history_tools()
         return reply
 
+    def _chitchat_memory_block(self, question: str, memory_block: str) -> str:
+        """Only inject long-term memory when the turn needs chat context."""
+        if needs_chat_context(question):
+            return memory_block
+        return ""
+
     def _generate_spoken_answer(
         self,
         question: str,
@@ -1524,31 +1622,40 @@ class OllamaChat:
         question = (question or "").strip()
         if not question:
             return "Sorry, I didn't catch that."
+        inject_memory = self._chitchat_memory_block(question, memory_block)
         messages = self._answer_messages(
             question,
-            memory_block=memory_block,
+            memory_block=inject_memory,
             history=self._history_for_answer(question),
         )
-        try:
-            content, thinking, _meta = self._post_chat(
-                messages,
-                num_predict=_CHAT_NUM_PREDICT,
-                temperature=0.3,
-                think=False,
-            )
-        except Exception as exc:
-            log.warning("Spoken answer failed: %s", exc)
-            return "Sorry, I got stuck for a moment."
-        raw = _strip_control_tokens(_strip_think_blocks(content or "")).strip()
-        if not raw:
-            raw = _strip_control_tokens(_strip_think_blocks(thinking or "")).strip()
-        picked = _pick_spoken_answer(raw, question)
-        if picked:
-            return picked
-        if raw and not _is_internal_monologue(raw):
-            line = _extract_last_short_line(raw)
-            if line and _looks_like_spoken_answer(line, question):
-                return line
+        strict = (
+            " Reply only as BOB speaking to the user right now. Use I and you — never they, their, or the user. "
+            "No planning, reasoning, or background narration."
+        )
+        messages[0] = {"role": "system", "content": messages[0]["content"] + strict}
+        messages[-1] = {
+            "role": "user",
+            "content": f"{question}\n\nReply aloud in one or two short sentences.",
+        }
+        raw = ""
+        for num_predict in (256, 384):
+            try:
+                content, _thinking, _meta = self._post_chat(
+                    messages,
+                    num_predict=num_predict,
+                    temperature=0.2,
+                    think=False,
+                )
+            except Exception as exc:
+                log.warning("Spoken answer failed: %s", exc)
+                return "Sorry, I got stuck for a moment."
+            raw = _strip_control_tokens(_strip_think_blocks(content or "")).strip()
+            thinking_raw = _strip_control_tokens(_strip_think_blocks(_thinking or "")).strip()
+            if not raw and thinking_raw:
+                raw = thinking_raw
+            for candidate in _spoken_answer_candidates(raw, question):
+                if _looks_like_spoken_answer(candidate, question):
+                    return _ensure_spoken_punctuation(candidate)
         return "Sorry, I didn't get that."
 
     def _recover_reply(
@@ -1585,7 +1692,11 @@ class OllamaChat:
             )
             if reply:
                 return reply
-        return self._generate_spoken_answer(question, memory_block=memory_block, on_tool=on_tool)
+        return self._generate_spoken_answer(
+            question,
+            memory_block=self._chitchat_memory_block(question, memory_block),
+            on_tool=on_tool,
+        )
 
     def chat(
         self,

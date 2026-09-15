@@ -183,8 +183,9 @@ class Tray:
 
         llm_items = []
         try:
-            for name, large in self.app._tray_models():
-                label = f"{name}  (too big for 10GB)" if large else name
+            for name, large, label in self.app._llm_menu_items():
+                if large and "(too big" not in label:
+                    label = f"{name}  (too big for 10GB)"
                 llm_items.append(radio("llm_model", name, label))
         except Exception:
             llm_items.append(pystray.MenuItem("No Ollama models", None, enabled=False))

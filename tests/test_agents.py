@@ -49,6 +49,12 @@ def test_choose_route_fast_paths():
         "direct",
         "shortcut",
     )
+    assert choose_route(
+        "What do you feel about the last question I asked you?",
+        thinks=True,
+        has_tools=True,
+        tools_unsupported=False,
+    ) == ("speak", "chitchat")
     assert choose_route("Are you censored?", thinks=False, has_tools=True, tools_unsupported=False) == (
         "tools",
         "react",

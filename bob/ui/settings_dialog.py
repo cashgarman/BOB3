@@ -68,6 +68,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.on_open_theme = on_open_theme
         self.on_close = on_close
         self.vars: dict[str, ctk.StringVar | ctk.BooleanVar] = {}
+        self._combos: dict[str, ctk.CTkComboBox] = {}
         self._recorder: HotkeyRecorder | None = None
         self._recording = False
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -145,6 +146,18 @@ class SettingsDialog(ctk.CTkToplevel):
     def apply_theme(self, theme: Theme) -> None:
         theming.restyle(self, theme)
         self.error.configure(text_color=theme.error)
+
+    def refresh_llm_models(self, models: list[str]) -> None:
+        combo = self._combos.get("llm_model")
+        var = self.vars.get("llm_model")
+        if combo is None or not isinstance(var, ctk.StringVar):
+            return
+        current = str(self.settings.llm_model or "")
+        values = list(models or [])
+        if current and current not in values:
+            values = [current, *values]
+        combo.configure(values=values or [current or ""])
+        var.set(current)
 
     def _open_theme(self) -> None:
         if self.on_open_theme:
@@ -243,13 +256,15 @@ class SettingsDialog(ctk.CTkToplevel):
             values = [current, *values]
         var = ctk.StringVar(value=current)
         self.vars[key] = var
-        ctk.CTkComboBox(
+        combo = ctk.CTkComboBox(
             parent,
             values=values or [""],
             variable=var,
             state="readonly",
             **theme.combo(),
-        ).pack(fill="x")
+        )
+        combo.pack(fill="x")
+        self._combos[key] = combo
 
     def _voice_picker(self, parent) -> None:
         theme = theming.current()

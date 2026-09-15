@@ -1,7 +1,7 @@
-llm_model: deepseek-r1:8b
+llm_model: qwen2.5:7b
 stt_model: parakeet-tdt-0.6b-v3
 stt_compute_type: int8_float16
-llm_num_ctx: 16384
+llm_num_ctx: 4096
 tts_voice: af_heart
 tts_speed: 1.0
 tts_mood: neutral

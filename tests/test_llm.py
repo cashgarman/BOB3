@@ -378,6 +378,19 @@ def test_format_calendar_tool_result_season():
     assert "10:50" not in _format_calendar_tool_result("What date is it?", stamp)
 
 
+def test_looks_like_spoken_answer_rejects_third_person_meta():
+    from bob.llm import _looks_like_spoken_answer
+
+    assert not _looks_like_spoken_answer(
+        "Their actual need might be to understand how AIs handle meta-questions.",
+        "But what do you feel about it?",
+    )
+    assert not _looks_like_spoken_answer(
+        "They could be curious about my design limitations or wanting to understand my reasoning process better.",
+        "You responded to me in the third person as if I wasn't in the room. Why?",
+    )
+
+
 def test_looks_like_spoken_answer_rejects_planning_meta():
     from bob.llm import _looks_like_spoken_answer
 
@@ -403,6 +416,103 @@ def test_sanitize_spoken_reply_extracts_declared_answer():
     assert _sanitize_spoken_reply(raw, user_text="What do you feel about being an AI?") == (
         "I don't have feelings but can simulate them to help."
     )
+
+
+def test_generate_spoken_answer_uses_thinking_when_content_empty():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+
+    class FakeClient:
+        def post(self, *args, **kwargs):
+            response = type("Resp", (), {})()
+            response.raise_for_status = lambda: None
+            response.json = lambda: {
+                "message": {
+                    "content": "",
+                    "thinking": (
+                        "I don't have a favorite color because I'm an AI. "
+                        "But I can help you explore colors if you'd like!"
+                    ),
+                }
+            }
+            return response
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    with patch("bob.llm.httpx.Client", return_value=FakeClient()):
+        reply = chat._generate_spoken_answer("What is your favorite color and why?")
+    assert reply.startswith("I don't have a favorite color")
+    assert "explore colors" in reply
+
+
+def test_coalesce_spoken_reply_keeps_full_answer_not_but_fragment():
+    from bob.llm import _coalesce_spoken_reply, _spoken_answer_candidates
+
+    raw = (
+        "I don't have a favorite color because I'm an AI without personal preferences. "
+        "But I can help you explore colors or their meanings if you're interested!"
+    )
+    question = "What is your favorite color and why?"
+    combined = _coalesce_spoken_reply(raw, question)
+    assert combined.startswith("I don't have a favorite color")
+    assert "But I can help you explore colors" in combined
+    candidates = _spoken_answer_candidates(raw, question)
+    assert candidates[0] == combined
+    assert not any(c.startswith("But I can help") and not c.startswith("I don't") for c in candidates[:1])
+
+
+def test_fragment_tail_rejected_alone():
+    from bob.llm import _looks_like_spoken_answer
+
+    assert not _looks_like_spoken_answer(
+        "But I can help you explore colors or their meanings if you're interested!",
+        "What is your favorite color and why?",
+    )
+
+
+def test_spoken_answer_candidates_prefers_first_person():
+    from bob.llm import _spoken_answer_candidates
+
+    raw = (
+        "Okay, the user is asking about my favorite color. "
+        "I like blue because it reminds me of a clear sky."
+    )
+    candidates = _spoken_answer_candidates(raw, "What is your favorite color and why?")
+    assert "I like blue because it reminds me of a clear sky." in candidates
+
+
+def test_first_person_answer_passes_gate():
+    from bob.llm import _looks_like_spoken_answer
+
+    assert _looks_like_spoken_answer(
+        "I don't have feelings, but I can still help you.",
+        "What do you feel about being an AI?",
+    )
+    assert _looks_like_spoken_answer(
+        "I'll go with blue because it's calming.",
+        "What is your favorite color and why?",
+    )
+
+
+def test_chitchat_memory_block_skipped_without_chat_context():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    assert chat._chitchat_memory_block("What's your favorite color?", "secret memory") == ""
+    assert chat._chitchat_memory_block("What about my last question?", "secret memory") == "secret memory"
+
+
+def test_compose_internal_thought_hides_model_monologue():
+    from bob.llm import _compose_internal_thought
+
+    monologue = (
+        "Okay, the user is asking about my favorite color. First, I need to remember "
+        "that I'm supposed to be straightforward."
+    )
+    thought = _compose_internal_thought(monologue, monologue, "", "What's your favorite color?")
+    assert thought == "Planned the reply internally."
+    assert "Okay, the user" not in thought
 
 
 def test_try_direct_answer_count_back():
@@ -768,32 +878,20 @@ def test_chat_general_question_skips_tool_rounds():
     tools = [{"type": "function", "function": {"name": "get_current_time", "parameters": {}}}]
     calls = {"stream": 0, "post": 0}
 
-    class FakeStream:
-        is_error = False
-
-        def read(self):
-            return b""
-
-        def iter_lines(self):
-            yield json.dumps(
-                {"message": {"content": "Russia is the largest country by area."}, "done": True}
-            )
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
     class FakeClient:
-        def stream(self, method, url, json=None):
+        def stream(self, *args, **kwargs):
             calls["stream"] += 1
-            calls["payload"] = json
-            return FakeStream()
+            raise AssertionError("chitchat should not stream")
 
         def post(self, *args, **kwargs):
             calls["post"] += 1
-            raise AssertionError("chitchat should stream once, not post")
+            calls["payload"] = kwargs.get("json") or (args[1] if len(args) > 1 else None)
+            response = type("Resp", (), {})()
+            response.raise_for_status = lambda: None
+            response.json = lambda: {
+                "message": {"content": "Russia is the largest country by area."}
+            }
+            return response
 
         def __enter__(self):
             return self
@@ -811,12 +909,13 @@ def test_chat_general_question_skips_tool_rounds():
             )
         )
     assert chunks == ["Russia is the largest country by area."]
-    assert calls["stream"] == 1
-    assert calls["post"] == 0
+    assert calls["stream"] == 0
+    assert calls["post"] == 1
     payload = calls["payload"]
     assert payload["think"] is False
-    assert [m["role"] for m in payload["messages"]] == ["system", "user"]
-    assert payload["messages"][-1]["content"] == "What's the biggest country in the world?"
+    assert payload["messages"][-1]["content"].startswith("What's the biggest country in the world?")
+    assert "Reply aloud" in payload["messages"][-1]["content"]
+    assert "never they, their, or the user" in payload["messages"][0]["content"].lower()
     assert payload["options"]["num_predict"] == 256
 
 
@@ -1051,29 +1150,17 @@ def test_round_yields_partial_on_cancel():
 
 
 def test_chat_keeps_partial_history_on_close():
-    import threading
-
     chat = OllamaChat("http://127.0.0.1:11434", "dolphin3:latest", 4096, "You are Bob.", 12)
-    cancel = threading.Event()
-
-    class FakeStream:
-        is_error = False
-
-        def read(self):
-            return b""
-
-        def iter_lines(self):
-            yield json.dumps({"message": {"content": "Partial answer"}, "done": True})
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
 
     class FakeClient:
+        def post(self, *args, **kwargs):
+            response = type("Resp", (), {})()
+            response.raise_for_status = lambda: None
+            response.json = lambda: {"message": {"content": "Partial answer."}}
+            return response
+
         def stream(self, *args, **kwargs):
-            return FakeStream()
+            raise AssertionError("chitchat should not stream")
 
         def __enter__(self):
             return self
@@ -1082,15 +1169,12 @@ def test_chat_keeps_partial_history_on_close():
             return False
 
     with patch("bob.llm.httpx.Client", return_value=FakeClient()):
-        gen = chat.chat("Weather?", cancel=cancel)
-        chunk = next(gen)
-        assert chunk == "Partial answer"
-        cancel.set()
-        gen.close()
+        chunks = list(chat.chat("Weather?"))
+    assert chunks == ["Partial answer."]
     assert chat.history[-2]["role"] == "user"
     assert chat.history[-2]["content"] == "Weather?"
     assert chat.history[-1]["role"] == "assistant"
-    assert chat.history[-1]["content"] == "Partial answer"
+    assert chat.history[-1]["content"] == "Partial answer."
 
 
 def test_chat_falls_back_when_model_rejects_tools():
@@ -1123,6 +1207,12 @@ def test_chat_falls_back_when_model_rejects_tools():
         def stream(self, *args, **kwargs):
             return FakeStream()
 
+        def post(self, *args, **kwargs):
+            response = type("Resp", (), {})()
+            response.raise_for_status = lambda: None
+            response.json = lambda: {"message": {"content": "I am not censored."}}
+            return response
+
         def __enter__(self):
             return self
 
@@ -1135,4 +1225,4 @@ def test_chat_falls_back_when_model_rejects_tools():
     assert chunks == ["I am not censored."]
     assert chat._tools_unsupported is True
     assert chunks2 == ["I am not censored."]
-    assert calls["n"] == 3
+    assert calls["n"] == 2

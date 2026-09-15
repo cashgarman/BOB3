@@ -463,6 +463,80 @@ def test_notify_ready_sends_silent_os_toast(tmp_path, monkeypatch):
     assert assistant._ready_toast_sent is True
 
 
+def test_set_llm_model_commits_when_installed(ui, tmp_path, monkeypatch):
+    assistant, *_ = _make_assistant(tmp_path, monkeypatch)
+    assistant.overlay = ui
+    assistant.tray = MagicMock()
+    assistant._ui = lambda fn: fn()
+    assistant._preload_safe = MagicMock()
+    monkeypatch.setattr("bob.ollama_pull.has_model", lambda host, model: True)
+
+    class ImmediateThread:
+        def __init__(self, target=None, args=(), kwargs=None, name=None, daemon=None):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    monkeypatch.setattr("bob.app.threading.Thread", ImmediateThread)
+
+    with patch.object(assistant.settings, "save"):
+        assistant._set_llm_model("qwen2.5:7b")
+
+    assert assistant.settings.llm_model == "qwen2.5:7b"
+    assert assistant.llm.model == "qwen2.5:7b"
+    assistant._preload_safe.assert_called_once()
+    assistant.tray.refresh.assert_called()
+
+
+def test_set_llm_model_pulls_missing_model(ui, tmp_path, monkeypatch):
+    assistant, *_ = _make_assistant(tmp_path, monkeypatch)
+    assistant.overlay = ui
+    assistant.root = ui
+    assistant.tray = MagicMock()
+    assistant._ui = lambda fn: fn()
+    assistant._preload_safe = MagicMock()
+    pulled: list[str] = []
+
+    def fake_pull(host, model, on_progress=None):
+        pulled.append(model)
+        if on_progress:
+            on_progress(50, 100, "downloading")
+
+    monkeypatch.setattr("bob.ollama_pull.has_model", lambda host, model: False)
+    monkeypatch.setattr("bob.ollama_pull.pull_model", fake_pull)
+
+    class ImmediateThread:
+        def __init__(self, target=None, args=(), kwargs=None, name=None, daemon=None):
+            self._target = target
+            self._args = args
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(*self._args, **self._kwargs)
+
+    monkeypatch.setattr("bob.app.threading.Thread", ImmediateThread)
+
+    with patch.object(assistant.settings, "save"):
+        assistant._set_llm_model("qwen2.5:7b")
+
+    assert pulled == ["qwen2.5:7b"]
+    assert assistant.settings.llm_model == "qwen2.5:7b"
+    assert assistant.llm.model == "qwen2.5:7b"
+    assistant._preload_safe.assert_called_once()
+
+
+def test_apply_setting_llm_model_defers_until_pull(ui, tmp_path, monkeypatch):
+    assistant, *_ = _make_assistant(tmp_path, monkeypatch)
+    assistant.overlay = ui
+    assistant._set_llm_model = MagicMock()
+
+    assistant.apply_setting("llm_model", "qwen2.5:7b")
+    assistant._set_llm_model.assert_called_once_with("qwen2.5:7b")
+
+
 def test_notify_ready_falls_back_to_tray_when_os_toast_fails(monkeypatch):
     from bob.app import Assistant
     from bob.settings import Settings

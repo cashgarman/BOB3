@@ -113,6 +113,9 @@ class FakeApp:
     def _tray_models(self) -> list[tuple[str, bool]]:
         return list(self._models)
 
+    def _llm_menu_items(self) -> list[tuple[str, bool, str]]:
+        return [(name, large, name) for name, large in self._tray_models()]
+
 
 class FakeHotkey:
     def __init__(self, spec: str, callback) -> None:

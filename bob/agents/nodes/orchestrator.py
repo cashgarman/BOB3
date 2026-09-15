@@ -9,6 +9,7 @@ from bob.llm import (
     _try_direct_answer,
     needs_agentic_tools,
     needs_calendar_context,
+    needs_chat_context,
     needs_conversation_log,
     needs_current_time,
 )
@@ -35,6 +36,8 @@ def choose_route(
         return "tools", "web_followup"
     if _try_direct_answer(user_text):
         return "direct", "shortcut"
+    if needs_chat_context(user_text):
+        return "speak", "chitchat"
     if has_tools and thinks and not needs_agentic_tools(user_text):
         return "speak", "chitchat"
     if needs_conversation_log(user_text) and has_tools:
