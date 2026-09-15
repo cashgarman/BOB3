@@ -121,6 +121,18 @@ class SettingsDialog(ctk.CTkToplevel):
         self._check(frame, "Tools enabled", "tools_enabled")
         self._entry(frame, "Tool timeout seconds", "tool_timeout_sec")
         self._entry(frame, "Max tool rounds per turn", "max_tool_rounds")
+        self._section(frame, "File access")
+        self._hint(
+            frame,
+            "Folders BOB may read or write with file tools. One absolute path per line. "
+            "BOB's own prompt files are always available.",
+        )
+        self.file_roots = ctk.CTkTextbox(frame, height=72, **theme.textbox())
+        self.file_roots.pack(fill="x")
+        roots = getattr(settings, "file_roots", None) or []
+        if isinstance(roots, str):
+            roots = [line.strip() for line in roots.splitlines() if line.strip()]
+        self.file_roots.insert("1.0", "\n".join(str(item) for item in roots))
         self._section(frame, "Agents")
         self._check(frame, "Score tool replies with a validator", "validator_on_tools")
         self._entry(frame, "Reply score sample rate", "score_sample_rate")
@@ -327,6 +339,8 @@ class SettingsDialog(ctk.CTkToplevel):
     def _save(self) -> None:
         raw = {key: var.get() for key, var in self.vars.items()}
         raw["system_prompt"] = self.prompt.get("1.0", "end").strip()
+        raw_roots = self.file_roots.get("1.0", "end").strip()
+        raw["file_roots"] = [line.strip() for line in raw_roots.splitlines() if line.strip()]
         typed = {}
         ints = {
             "llm_num_ctx",

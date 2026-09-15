@@ -139,3 +139,70 @@ Turns long text into a short answer meant to be spoken aloud.
 | **Use when** | Web search or other tools return more text than should be read aloud, or the user asks for a summary or bullet points. |
 
 Uses the local Ollama model with thinking disabled. Bob also calls this automatically after a fresh web search.
+
+---
+
+## list_prompts
+
+Lists BOB's prompt template files with absolute paths and a one-line purpose for each.
+
+| | |
+|---|---|
+| **Module** | `bob/tools/builtin/files.py` |
+| **Arguments** | none |
+| **Use when** | The user asks about BOB's personality, instructions, system prompt, or where prompts are stored. |
+
+Also notes which prompts live only in Python source (prompt lab, memory extract, etc.).
+
+---
+
+## list_files
+
+Lists files and folders under an allowed directory.
+
+| | |
+|---|---|
+| **Module** | `bob/tools/builtin/files.py` |
+| **Arguments** | `path` (optional) — directory under `prompts/`, `file_roots`, or defaults to the first configured file root / `prompts/` |
+| **Use when** | The user wants to see what is in a folder BOB can access. |
+
+---
+
+## read_file
+
+Reads a UTF-8 text file under an allowed root.
+
+| | |
+|---|---|
+| **Module** | `bob/tools/builtin/files.py` |
+| **Arguments** | `path` (required), `offset` (optional line offset), `limit` (optional line count) |
+| **Allowed** | `prompts/*.txt`, `config.yaml` (read-only), `data/notes.md`, paths under `file_roots` in `config.yaml` |
+| **Use when** | The user asks to read or inspect a file BOB can access. |
+
+---
+
+## write_file
+
+Creates or overwrites a UTF-8 text file under an allowed root.
+
+| | |
+|---|---|
+| **Module** | `bob/tools/builtin/files.py` |
+| **Arguments** | `path` (required), `content` (required) |
+| **Use when** | The user asks BOB to create a file or replace an entire file. |
+
+Writing `prompts/system.txt` goes through `save_system_prompt()` so settings stay in sync. `config.yaml` is read-only.
+
+---
+
+## edit_file
+
+Replaces exactly one occurrence of text in a file.
+
+| | |
+|---|---|
+| **Module** | `bob/tools/builtin/files.py` |
+| **Arguments** | `path` (required), `old_text` (required), `new_text` (required) |
+| **Use when** | The user asks for a small change to a prompt or other text file. |
+
+Safer than `write_file` for prompt tweaks. Fails if `old_text` is missing or appears more than once.

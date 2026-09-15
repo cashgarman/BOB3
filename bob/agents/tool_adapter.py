@@ -7,7 +7,7 @@ from langchain_core.tools import StructuredTool
 
 from bob.tools.base import ToolSpec
 
-WRITE_TOOLS = frozenset({"notes_write"})
+WRITE_TOOLS = frozenset({"notes_write", "write_file", "edit_file"})
 
 
 def spec_to_langchain_tool(

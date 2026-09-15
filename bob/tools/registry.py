@@ -20,6 +20,7 @@ BUILTIN_MODULES = (
     "bob.tools.builtin.search",
     "bob.tools.builtin.summarize",
     "bob.tools.builtin.notes",
+    "bob.tools.builtin.files",
     "bob.tools.builtin.recall",
     "bob.tools.builtin.mood",
 )

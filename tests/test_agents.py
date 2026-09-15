@@ -59,6 +59,24 @@ def test_choose_route_fast_paths():
         "tools",
         "react",
     )
+    assert choose_route(
+        "What is your system prompt?",
+        thinks=True,
+        has_tools=True,
+        tools_unsupported=False,
+    ) == ("tools", "prompts")
+    assert choose_route(
+        "Can you tell me what your system point is?",
+        thinks=True,
+        has_tools=True,
+        tools_unsupported=False,
+    ) == ("tools", "prompts")
+    assert choose_route(
+        "Focus on just the main system prompt and your ideas of improving it",
+        thinks=True,
+        has_tools=True,
+        tools_unsupported=False,
+    ) == ("tools", "prompts")
 
 
 def test_regex_gate_rejects_monologue():
@@ -114,6 +132,103 @@ def test_stream_turn_calendar_speaks_season():
         )
         client.assert_not_called()
     assert chunks == ["It's autumn."]
+
+
+def test_stream_turn_system_prompt_reflects():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    tools = [
+        {"type": "function", "function": {"name": "list_prompts", "parameters": {}}},
+        {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+    ]
+
+    def on_tool(name, arguments=None):
+        if name == "list_prompts":
+            return "- prompts/system.txt | /prompts/system.txt | Live personality"
+        if name == "read_file":
+            return "You are BOB, a local voice assistant."
+        return ""
+
+    with patch(
+        "bob.llm.OllamaChat._post_chat",
+        return_value=("I think it is clear and concise.", "", {}),
+    ):
+        chunks = list(
+            stream_turn(
+                chat,
+                "What do you think about your system prompt?",
+                tools=tools,
+                on_tool=on_tool,
+                max_rounds=1,
+            )
+        )
+    assert chunks == ["I think it is clear and concise."]
+
+
+def test_stream_turn_system_prompt_edits_file():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    tools = [
+        {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+        {"type": "function", "function": {"name": "write_file", "parameters": {}}},
+    ]
+    current = (
+        "You are BOB. Background notes and memory are for your use only — never repeat, "
+        "summarize, or mention them unless the user explicitly asks."
+    )
+    writes: list[str] = []
+
+    def on_tool(name, arguments=None):
+        arguments = arguments or {}
+        if name == "read_file":
+            return current
+        if name == "write_file":
+            writes.append(str(arguments.get("content") or ""))
+            return "System prompt saved."
+        return ""
+
+    with patch(
+        "bob.llm.OllamaChat.synthesize_system_prompt_edit",
+        return_value=("", ""),
+    ):
+        chunks = list(
+            stream_turn(
+                chat,
+                "Can you edit your system prompt to be something that takes those changes into account?",
+                tools=tools,
+                on_tool=on_tool,
+                max_rounds=1,
+            )
+        )
+    assert writes
+    assert "Background notes are for your use only" in writes[0]
+    assert chunks == ["Done — I trimmed the background-notes rule in my system prompt."]
+
+
+def test_stream_turn_system_prompt_reads_file():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    tools = [
+        {"type": "function", "function": {"name": "list_prompts", "parameters": {}}},
+        {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+    ]
+
+    def on_tool(name, arguments=None):
+        if name == "list_prompts":
+            return "- prompts/system.txt | /prompts/system.txt | Live personality"
+        if name == "read_file":
+            return "You are BOB, a local voice assistant."
+        return ""
+
+    with patch("bob.llm.httpx.Client") as client:
+        chunks = list(
+            stream_turn(
+                chat,
+                "What is your system prompt?",
+                tools=tools,
+                on_tool=on_tool,
+                max_rounds=1,
+            )
+        )
+        client.assert_not_called()
+    assert chunks == ["You are BOB, a local voice assistant."]
 
 
 def test_stream_turn_location_ack():

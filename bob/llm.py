@@ -48,7 +48,8 @@ _PLANNING_REPLY_RE = re.compile(
     r"their actual need|they could be|they might be|deeper need might be|"
     r"explanation is in the background|share as the|for your use only|"
     r"background too|planned the reply|meant to be heard|design limitations|"
-    r"reasoning process)\b",
+    r"reasoning process|i(?:'|')?m thinking about|let me think|i need to think|"
+    r"might need improvement|would need improvement|still thinking about)\b",
     re.IGNORECASE,
 )
 _THIRD_PERSON_SPOKEN_RE = re.compile(
@@ -104,8 +105,252 @@ def needs_conversation_log(user_text: str) -> bool:
     return any(k in t for k in keys)
 
 
+def needs_prompt_files(user_text: str) -> bool:
+    """User is asking about BOB's prompt templates or instructions on disk."""
+    t = (user_text or "").lower()
+    keys = (
+        "system prompt",
+        "system point",
+        "system part",
+        "your prompt",
+        "your instructions",
+        "tool guidance",
+        "prompt file",
+        "prompt files",
+        "list prompt",
+        "full prompt",
+        "entire prompt",
+        "my prompt",
+        "edit my prompt",
+        "change your prompt",
+        "personality file",
+        "instructions file",
+    )
+    if any(k in t for k in keys):
+        return True
+    return "prompt" in t and any(
+        phrase in t for phrase in ("what is", "what's", "show", "read", "list", "tell me", "display")
+    )
+
+
+PROMPT_FILES_FOR_CONTEXT: tuple[str, ...] = (
+    "prompts/system.txt",
+    "prompts/answer.txt",
+    "prompts/tool_guidance.txt",
+    "prompts/tool_synthesis.txt",
+    "prompts/session_title.txt",
+)
+PROMPT_FILE_FOR_REFLECT: tuple[str, ...] = ("prompts/system.txt",)
+
+
+def wants_prompt_reflection(user_text: str) -> bool:
+    t = (user_text or "").lower()
+    if "prompt" not in t:
+        return False
+    keys = (
+        "how do you feel",
+        "what do you think",
+        "would you change",
+        "anything you would change",
+        "your opinion",
+        "reflect on",
+        "critique",
+        "improve",
+        "feel about",
+        "think about",
+        "focus on",
+        "your ideas",
+        "those system",
+        "those prompt",
+        "main system prompt",
+        "ideas of improving",
+    )
+    return any(k in t for k in keys)
+
+
+def wants_prompt_edit(user_text: str) -> bool:
+    """User wants BOB to change a prompt file on disk, not just discuss it."""
+    t = (user_text or "").lower()
+    if wants_prompt_reflection(user_text):
+        return False
+    edit_verbs = ("edit", "update", "change", "modify", "rewrite", "revise", "apply")
+    if not any(verb in t for verb in edit_verbs):
+        return False
+    prompt_markers = (
+        "system prompt",
+        "your prompt",
+        "my prompt",
+        "prompt file",
+        "instructions file",
+        "instructions",
+        "personality file",
+        "tool guidance",
+    )
+    if any(marker in t for marker in prompt_markers):
+        return True
+    return "prompt" in t and any(word in t for word in ("your", "my", "the"))
+
+
+def wants_prompt_catalog_list(user_text: str) -> bool:
+    t = (user_text or "").lower()
+    if wants_prompt_reflection(user_text) or wants_prompt_edit(user_text):
+        return False
+    return ("list" in t or "all my" in t or "all your" in t or "full system prompts" in t) and "prompt" in t
+
+
+def wants_verbatim_system_prompt(user_text: str) -> bool:
+    t = (user_text or "").lower()
+    if wants_prompt_reflection(user_text) or wants_prompt_catalog_list(user_text) or wants_prompt_edit(user_text):
+        return False
+    if not any(marker in t for marker in ("system prompt", "system point", "system part")):
+        return False
+    return any(
+        phrase in t
+        for phrase in (
+            "what is",
+            "what's",
+            "exact",
+            "read your",
+            "read the",
+            "read my",
+            "by reading",
+            "show me your",
+            "show your",
+            "tell me your",
+            "tell me what",
+            "display",
+            "contents",
+        )
+    )
+
+
+def wants_full_prompt_content(user_text: str) -> bool:
+    """Backward-compatible alias for callers that load system.txt."""
+    return wants_verbatim_system_prompt(user_text)
+
+
+def _prompt_reflect_has_substance(text: str) -> bool:
+    """Reflection answers must state an opinion or concrete change, not defer."""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if _PLANNING_REPLY_RE.search(t):
+        return False
+    opinion_markers = (
+        "i think",
+        "i like",
+        "i'd",
+        "i would",
+        "works well",
+        "clear",
+        "helpful",
+        "change",
+        "shorter",
+        "longer",
+        "better",
+        "improve",
+        "add ",
+        "remove ",
+        "tone",
+        "concise",
+        "direct",
+    )
+    return any(marker in t for marker in opinion_markers)
+
+
+_BACKGROUND_NOTES_RULE = (
+    "Background notes and memory are for your use only — never repeat, summarize, "
+    "or mention them unless the user explicitly asks."
+)
+_BACKGROUND_NOTES_RULE_SHORT = (
+    "Background notes are for your use only — do not mention them unless the user asks."
+)
+
+
+def format_prompt_edit_fallback(system_text: str) -> tuple[str, str]:
+    """Deterministic system-prompt edit when LLM synthesis fails."""
+    body = (system_text or "").strip()
+    if not body or body.startswith("Error"):
+        return "", ""
+    if _BACKGROUND_NOTES_RULE in body:
+        updated = body.replace(_BACKGROUND_NOTES_RULE, _BACKGROUND_NOTES_RULE_SHORT, 1)
+        return updated, "Done — I trimmed the background-notes rule in my system prompt."
+    return body, ""
+
+
+def _parse_prompt_edit_response(content: str) -> tuple[str, str]:
+    text = _strip_think_blocks(content or "").strip()
+    if not text:
+        return "", ""
+    if "\n---\n" in text:
+        prompt, spoken = text.split("\n---\n", 1)
+        return prompt.strip(), spoken.strip()
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            return parts[1].strip(), parts[2].strip()
+    return text, ""
+
+
+def format_prompt_reflect_fallback(system_text: str) -> str:
+    body = (system_text or "").strip()
+    if body.startswith("Error") or not body:
+        return (
+            "I think my system prompt keeps me concise and spoken-friendly. "
+            "I'd shorten the background-notes rule a little if I could."
+        )
+    if "two or three" in body.lower() or "spoken" in body.lower():
+        return (
+            "I think it's clear about keeping answers short and natural for voice. "
+            "If I changed one thing, I'd trim the background-notes warning slightly."
+        )
+    return (
+        "I think the prompt sets a helpful tone. "
+        "I'd make one small edit to keep the spoken-answer rules even tighter."
+    )
+
+
+def format_prompt_catalog_reply(catalog: str) -> str:
+    items: list[str] = []
+    for line in (catalog or "").splitlines():
+        if "|" not in line or "prompts/" not in line:
+            continue
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) < 3:
+            continue
+        name = parts[0].lstrip("- ").replace("prompts/", "")
+        purpose = parts[2]
+        items.append(f"{name} ({purpose})")
+    if items:
+        return "My prompt files are " + "; ".join(items[:6]) + "."
+    return "I could not load my prompt catalog."
+
+
+def format_prompt_spoken_reply(user_text: str, catalog: str, system_text: str = "") -> str:
+    body = (system_text or "").strip()
+    if body and not body.startswith("Error"):
+        lines = [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.startswith("[")]
+        spoken = " ".join(lines[:4])
+        if len(spoken) > 500:
+            spoken = spoken[:497].rsplit(" ", 1)[0] + "..."
+        if spoken:
+            return spoken
+    names: list[str] = []
+    for line in (catalog or "").splitlines():
+        if "|" not in line or "prompts/" not in line:
+            continue
+        part = line.split("|", 1)[0].strip().lstrip("- ").strip()
+        if part.startswith("prompts/"):
+            names.append(part.replace("prompts/", ""))
+    if names:
+        return f"My prompt templates include {', '.join(names[:6])}."
+    return "I could not load my prompt catalog."
+
+
 def needs_agentic_tools(user_text: str) -> bool:
     """Only run tool-selection rounds when the user likely needs a tool."""
+    if needs_prompt_files(user_text):
+        return True
     if needs_current_time(user_text) or needs_conversation_log(user_text) or needs_calendar_context(user_text):
         return True
     if _needs_web_search(user_text) or needs_chat_context(user_text):
@@ -121,6 +366,23 @@ def needs_agentic_tools(user_text: str) -> bool:
         "conversation log",
         "what did i say",
         "save this",
+        "read file",
+        "read the file",
+        "write file",
+        "create file",
+        "create a file",
+        "edit file",
+        "open file",
+        "save file",
+        "list files",
+        "system prompt",
+        "your prompt",
+        "your instructions",
+        "personality",
+        "tool guidance",
+        "prompt file",
+        "edit my prompt",
+        "change your prompt",
     )
     return any(k in t for k in keys)
 
@@ -349,8 +611,10 @@ def _looks_like_spoken_answer(text: str, question: str = "") -> bool:
         return False
     if question and _is_useless_reply(t, question):
         return False
-    if re.fullmatch(r"\d+", t):
-        return True
+    if re.fullmatch(r"\d+\.?", t):
+        if question and (_MATH_PLUS_RE.search(question) or _MATH_TIMES_RE.search(question)):
+            return True
+        return False
     if _is_internal_monologue(t):
         return False
     max_chars = _spoken_max_chars(question)
@@ -360,7 +624,11 @@ def _looks_like_spoken_answer(text: str, question: str = "") -> bool:
     if _user_wants_bullets(question) and _looks_like_bullet_list(t) and len(t) <= max_chars:
         return True
     if t[-1] in ".!?" and len(t) <= max_chars:
-        return bool(re.findall(r"[a-z0-9']+", t.lower()))
+        words = re.findall(r"[a-z0-9']+", t.lower())
+        if len(words) >= 2:
+            return True
+        if len(words) == 1 and not re.fullmatch(r"\d+\.?", t):
+            return True
     word_count = len(re.findall(r"[a-z0-9']+", t.lower()))
     if (
         len(t) <= min(120, max_chars)
@@ -1476,6 +1744,159 @@ class OllamaChat:
             memory_block=memory_block,
             history=self._history_for_answer(question),
         )
+
+    def _prompt_reply_is_usable(self, reply: str, question: str, *, reflect: bool = False) -> bool:
+        text = (reply or "").strip()
+        if not text or text.startswith("Sorry"):
+            return False
+        if re.fullmatch(r"\d+\.?", text):
+            return False
+        if len(text) < 15:
+            return False
+        if _is_planning_reply(text):
+            return False
+        if reflect and not _prompt_reflect_has_substance(text):
+            return False
+        return _looks_like_spoken_answer(text, question)
+
+    def synthesize_prompt_reply(
+        self,
+        question: str,
+        tool_results: list[tuple[str, str]],
+        *,
+        reflect: bool,
+        on_thought: Callable[[str], None] | None = None,
+    ) -> str:
+        """Turn loaded prompt files into a spoken list or reflection."""
+        question = (question or "").strip()
+        usable = [
+            (name, content)
+            for name, content in tool_results
+            if (content or "").strip() and not str(content).strip().startswith("Error")
+        ]
+        if not question or not usable:
+            return ""
+        block = _format_tool_results_block(usable)
+        base_reflect = (
+            "You are BOB reviewing your own on-disk prompt template files. "
+            "Answer in two or three natural spoken sentences meant to be heard aloud. "
+            "State your opinion now and, if asked, one concrete change you would make. "
+            "Do not read prompts verbatim, list file paths, or mention tools. "
+            "Never say you are thinking, might improve later, or will answer later."
+        )
+        base_catalog = (
+            "You are BOB. The user asked about your prompt template files. "
+            "Briefly describe what each prompt file is for in two or three spoken sentences. "
+            "Do not read them verbatim or mention file paths."
+        )
+        strict_suffix = (
+            " Give the full answer immediately in complete sentences. "
+            "Start with I think and include one specific change if improvements were requested."
+        )
+        for strict in (False, True):
+            instruction = (base_reflect if reflect else base_catalog) + (strict_suffix if strict else "")
+            messages: list[dict[str, str]] = [{"role": "system", "content": instruction}]
+            messages.extend(self._history_for_answer(question))
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"User question:\n{question}\n\n{block}\n\n"
+                        "Reply aloud in two or three short sentences."
+                    ),
+                }
+            )
+            try:
+                content, _thinking, _meta = self._post_chat(
+                    messages,
+                    num_predict=220,
+                    temperature=0.2,
+                    think=False,
+                )
+            except Exception as exc:
+                log.warning("Prompt reply synthesis failed: %s", exc)
+                continue
+            reply = _sanitize_spoken_reply(_strip_think_blocks(content or ""), self.history, question)
+            if reply and self._prompt_reply_is_usable(reply, question, reflect=reflect):
+                self._append_internal_thought(
+                    "Reflected on the prompt files." if reflect else "Summarized the prompt files.",
+                    on_thought,
+                )
+                self.history.append({"role": "assistant", "content": reply})
+                return reply
+        if reflect:
+            system_text = ""
+            for name, content in usable:
+                if name.endswith("system.txt"):
+                    system_text = content
+                    break
+            reply = format_prompt_reflect_fallback(system_text)
+            if reply:
+                self._append_internal_thought("Used a deterministic prompt reflection fallback.", on_thought)
+                self.history.append({"role": "assistant", "content": reply})
+                return reply
+        return ""
+
+    def _prompt_edit_is_usable(self, new_text: str, current_text: str) -> bool:
+        candidate = (new_text or "").strip()
+        current = (current_text or "").strip()
+        if not candidate or candidate.startswith("Error"):
+            return False
+        if len(candidate) < 20:
+            return False
+        return candidate != current
+
+    def synthesize_system_prompt_edit(
+        self,
+        question: str,
+        current_text: str,
+        *,
+        on_thought: Callable[[str], None] | None = None,
+    ) -> tuple[str, str]:
+        """Revise prompts/system.txt and return (new_content, spoken_confirmation)."""
+        question = (question or "").strip()
+        current = (current_text or "").strip()
+        if not question or not current or current.startswith("Error"):
+            return "", ""
+        base_instruction = (
+            "You revise BOB's on-disk system prompt. "
+            "Use recent conversation when the user says things like 'those changes'. "
+            "Output exactly two sections separated by a line containing only ---\n"
+            "Section 1: the complete new system prompt (plain text only)\n"
+            "Section 2: two short spoken sentences confirming what changed (no paths, no markdown)"
+        )
+        strict_suffix = (
+            " Apply the requested edits now. Keep BOB's spoken voice-assistant tone."
+        )
+        for strict in (False, True):
+            messages: list[dict[str, str]] = [
+                {"role": "system", "content": base_instruction + (strict_suffix if strict else "")}
+            ]
+            messages.extend(self._history_for_answer(question))
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"Current system prompt:\n{current}\n\nUser request:\n{question}",
+                }
+            )
+            try:
+                content, _thinking, _meta = self._post_chat(
+                    messages,
+                    num_predict=420,
+                    temperature=0.2,
+                    think=False,
+                )
+            except Exception as exc:
+                log.warning("Prompt edit synthesis failed: %s", exc)
+                continue
+            new_prompt, spoken = _parse_prompt_edit_response(content or "")
+            spoken = _sanitize_spoken_reply(_strip_think_blocks(spoken), self.history, question)
+            if self._prompt_edit_is_usable(new_prompt, current):
+                self._append_internal_thought("Revised the system prompt on disk.", on_thought)
+                if spoken and _looks_like_spoken_answer(spoken, question):
+                    self.history.append({"role": "assistant", "content": spoken})
+                return new_prompt.strip(), spoken
+        return "", ""
 
     def _finalize_tool_synthesis(
         self,

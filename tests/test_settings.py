@@ -71,3 +71,17 @@ def test_load_settings_ignores_unknown_and_bad_overrides(tmp_path: Path):
     assert loaded.llm_model == "demo"
     assert loaded.theme_overrides == {}
     assert loaded.tts_mood == "excited"
+
+
+def test_load_settings_coerces_file_roots(tmp_path: Path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "llm_model: demo\nfile_roots:\n  - C:/Projects/foo\n  - C:/Projects/bar\n",
+        encoding="utf-8",
+    )
+    loaded = load_settings(path)
+    assert loaded.file_roots == ["C:/Projects/foo", "C:/Projects/bar"]
+
+    path.write_text('llm_model: demo\nfile_roots: "C:/one\\nC:/two"\n', encoding="utf-8")
+    loaded = load_settings(path)
+    assert loaded.file_roots == ["C:/one", "C:/two"]

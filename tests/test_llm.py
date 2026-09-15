@@ -544,6 +544,55 @@ def test_needs_agentic_tools():
     assert needs_agentic_tools(
         "Can you look up the top headlines in BBC News at news.bbc.co.uk?"
     )
+    assert needs_agentic_tools("Edit my system prompt to be friendlier")
+    assert needs_agentic_tools("Read the file in my documents folder")
+    assert needs_agentic_tools("Create a file called todo.txt")
+    from bob.llm import (
+        format_prompt_edit_fallback,
+        needs_prompt_files,
+        wants_prompt_catalog_list,
+        wants_prompt_edit,
+        wants_prompt_reflection,
+        wants_verbatim_system_prompt,
+    )
+
+    assert needs_prompt_files("What is your system prompt?")
+    assert needs_prompt_files("Can you tell me what your system point is?")
+    assert needs_prompt_files("List your full system prompts please")
+    assert wants_verbatim_system_prompt("What is your system prompt?")
+    assert not wants_verbatim_system_prompt("Can you list your full system prompts please?")
+    assert wants_prompt_catalog_list("Can you list your full system prompts please?")
+    assert wants_prompt_reflection("How do you feel about your current system prompt?")
+    assert wants_prompt_reflection("What do you think about those system prompts?")
+    assert wants_prompt_reflection("Focus on just the main system prompt and your ideas of improving it")
+    assert wants_prompt_edit(
+        "Can you edit your system prompt to be something that takes those changes into account?"
+    )
+    assert not wants_prompt_edit("How do you feel about your current system prompt?")
+    updated, spoken = format_prompt_edit_fallback(
+        "You are BOB. Background notes and memory are for your use only — never repeat, "
+        "summarize, or mention them unless the user explicitly asks."
+    )
+    assert "Background notes are for your use only" in updated
+    assert spoken.startswith("Done")
+
+    from bob.llm import OllamaChat, _looks_like_spoken_answer
+
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    assert not chat._prompt_reply_is_usable("3.", "What do you think about those system prompts?")
+    assert not _looks_like_spoken_answer("3.", "What do you think about those system prompts?")
+    deferral = "I'm thinking about what might need improvement."
+    assert not chat._prompt_reply_is_usable(
+        deferral,
+        "How do you feel about your current system prompt?",
+        reflect=True,
+    )
+    assert not _looks_like_spoken_answer(deferral, "How do you feel about your current system prompt?")
+    assert chat._prompt_reply_is_usable(
+        "I think it's clear and I'd shorten the background-notes rule.",
+        "How do you feel about your current system prompt?",
+        reflect=True,
+    )
 
 
 def test_context_usage():

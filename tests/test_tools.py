@@ -9,7 +9,30 @@ import pytest
 from bob.tools.base import ToolContext, ToolError, clip_result, parse_arguments, sanitize_name
 from bob.tools.registry import ToolRegistry, declared_tools, tool
 from bob.tools.schema import spec_from_function
+from bob.settings import Settings
 from tests.fakes import FakeMemory
+
+
+def _file_sandbox(tmp_path: Path, monkeypatch):
+    root = tmp_path / "bobroot"
+    prompts = root / "prompts"
+    prompts.mkdir(parents=True)
+    (prompts / "system.txt").write_text("You are BOB.\n", encoding="utf-8")
+    (prompts / "answer.txt").write_text("Answer briefly.\n", encoding="utf-8")
+    (root / "config.yaml").write_text("llm_model: qwen3:4b\n", encoding="utf-8")
+    data = root / "data"
+    data.mkdir()
+    (data / "notes.md").write_text("hello notes\n", encoding="utf-8")
+    user_dir = tmp_path / "userfiles"
+    user_dir.mkdir()
+    (user_dir / "draft.txt").write_text("draft content\n", encoding="utf-8")
+
+    monkeypatch.setattr("bob.paths.project_root", lambda: root)
+    monkeypatch.setattr("bob.prompts.PROMPTS_DIR", prompts)
+    monkeypatch.setattr("bob.settings.CONFIG_PATH", root / "config.yaml")
+    monkeypatch.setattr("bob.tools.builtin.files.PROMPTS_DIR", prompts)
+    monkeypatch.setattr("bob.tools.builtin.files.CONFIG_PATH", root / "config.yaml")
+    return root, prompts, user_dir
 
 
 def test_sanitize_parse_clip():
@@ -55,6 +78,10 @@ def test_tool_registry_load_builtins_and_invoke(tmp_path: Path):
     assert "web_search" in names
     assert "summarize_for_speech" in names
     assert "notes_read" in names
+    assert "list_prompts" in names
+    assert "read_file" in names
+    assert "write_file" in names
+    assert "edit_file" in names
     assert "set_speech_mood" in names
     assert "memory_search" in names
 
@@ -177,4 +204,68 @@ def test_web_search_tool(tmp_path: Path):
         failed = reg.invoke("web_search", {"query": "weather today"}, ctx=ctx)
     assert "Error" in failed
     assert "network down" in failed
+    reg.close()
+
+
+def test_file_tools_sandbox_and_crud(tmp_path: Path, monkeypatch):
+    root, prompts, user_dir = _file_sandbox(tmp_path, monkeypatch)
+    settings = Settings(file_roots=[str(user_dir)])
+    reg = ToolRegistry(root / "data", settings=settings)
+    reg.load()
+    ctx = reg.context()
+
+    listed = reg.invoke("list_prompts", {}, ctx=ctx)
+    assert "prompts/system.txt" in listed
+    assert "config.yaml" in listed
+    assert str(user_dir) in listed
+
+    read = reg.invoke("read_file", {"path": "prompts/system.txt"}, ctx=ctx)
+    assert "You are BOB." in read
+
+    outside = reg.invoke("read_file", {"path": str(tmp_path / "outside.txt")}, ctx=ctx)
+    assert "Error" in outside
+
+    wrote = reg.invoke(
+        "write_file",
+        {"path": str(user_dir / "new.txt"), "content": "fresh file\n"},
+        ctx=ctx,
+    )
+    assert "Wrote" in wrote
+    assert (user_dir / "new.txt").read_text(encoding="utf-8") == "fresh file\n"
+
+    edited = reg.invoke(
+        "edit_file",
+        {"path": str(user_dir / "draft.txt"), "old_text": "draft", "new_text": "final"},
+        ctx=ctx,
+    )
+    assert "Wrote" in edited or "draft" in edited.lower()
+    assert "final content" in (user_dir / "draft.txt").read_text(encoding="utf-8")
+
+    blocked = reg.invoke("write_file", {"path": "config.yaml", "content": "broken"}, ctx=ctx)
+    assert "Error" in blocked
+
+    files = reg.invoke("list_files", {"path": str(user_dir)}, ctx=ctx)
+    assert "draft.txt" in files
+    reg.close()
+
+
+def test_write_system_prompt_syncs_settings(tmp_path: Path, monkeypatch):
+    root, prompts, user_dir = _file_sandbox(tmp_path, monkeypatch)
+    settings = Settings(system_prompt="You are BOB.\n")
+    config_path = root / "config.yaml"
+    settings.save(config_path)
+    monkeypatch.setattr("bob.settings.CONFIG_PATH", config_path)
+
+    reg = ToolRegistry(root / "data", settings=settings)
+    reg.load()
+    ctx = reg.context()
+
+    out = reg.invoke(
+        "write_file",
+        {"path": "prompts/system.txt", "content": "You are a helpful pirate.\n"},
+        ctx=ctx,
+    )
+    assert "System prompt" in out
+    assert prompts.joinpath("system.txt").read_text(encoding="utf-8").strip() == "You are a helpful pirate."
+    assert settings.system_prompt.strip() == "You are a helpful pirate."
     reg.close()

@@ -66,6 +66,7 @@ class Settings:
     prompt_rollback_delta: float = 0.08
     prompt_cooldown_hours: float = 24.0
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
+    file_roots: list[str] = field(default_factory=list)
     # UI theme: a preset name from bob.ui.theme.PRESETS plus per-slot overrides
     # (e.g. {"accent": "#ff8800", "font_family": "Consolas", "appearance": "light"}).
     theme: str = "midnight"
@@ -119,4 +120,12 @@ def load_settings(path: Path = CONFIG_PATH) -> Settings:
         coerced["turn_detector"] = mode if mode in {"smart_turn", "silence"} else "smart_turn"
     if "system_prompt" not in coerced:
         coerced["system_prompt"] = load_system_prompt()
+    if "file_roots" in coerced:
+        raw_roots = coerced.get("file_roots")
+        if isinstance(raw_roots, str):
+            coerced["file_roots"] = [line.strip() for line in raw_roots.splitlines() if line.strip()]
+        elif isinstance(raw_roots, list):
+            coerced["file_roots"] = [str(item).strip() for item in raw_roots if str(item).strip()]
+        else:
+            coerced["file_roots"] = []
     return Settings(**coerced)

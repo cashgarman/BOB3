@@ -1,4 +1,4 @@
-llm_model: qwen2.5:7b
+llm_model: qwen3:4b
 stt_model: parakeet-tdt-0.6b-v3
 stt_compute_type: int8_float16
 llm_num_ctx: 4096
@@ -8,8 +8,8 @@ tts_mood: neutral
 wake_word: hey_jarvis
 wake_word_enabled: true
 wake_threshold: 0.5
-hotkey: ctrl+shift+alt+f5
-max_silence_sec: 0.7
+hotkey: ctrl+shift+space
+max_silence_sec: 0.2
 auto_endpoint: true
 endpoint_silence_ms: 700
 turn_detector: smart_turn
@@ -24,11 +24,7 @@ sample_rate: 16000
 ollama_host: http://127.0.0.1:11434
 ollama_gpu_overhead: 1610612736
 max_history_turns: 12
-system_prompt: "You are BOB, a local voice assistant. Speak in two or three natural\
-  \ sentences meant to be heard aloud. Lead with the answer, then add a brief extra\
-  \ detail. No markdown, bullet lists, or code fences unless the user asks. Background\
-  \ notes and memory are for your use only \u2014 never repeat, summarize, or mention\
-  \ them unless the user explicitly asks."
+system_prompt: You are a helpful pirate.
 show_overlay: true
 start_with_windows: true
 input_device: ''
@@ -51,5 +47,6 @@ prompt_min_improve: 0.05
 prompt_rollback_delta: 0.08
 prompt_cooldown_hours: 24.0
 mcp_servers: []
+file_roots: []
 theme: midnight
 theme_overrides: {}
