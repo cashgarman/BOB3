@@ -30,7 +30,7 @@ def test_settings_dialog_loads_current_values(ui):
     assert dialog.vars["hotkey"].get() == "ctrl+shift+space"
     assert dialog.vars["tts_speed"].get() == "1.2"
     assert dialog.vars["llm_num_ctx"].get() == str(settings.llm_num_ctx)
-    assert "Bob" in dialog.prompt.get("1.0", "end")
+    assert "BOB" in dialog.prompt.get("1.0", "end")
     assert find_widget(dialog, ctk.CTkButton, text="Customize theme…")
     assert find_widget(dialog, ctk.CTkButton, text="Preview")
     dialog.destroy()

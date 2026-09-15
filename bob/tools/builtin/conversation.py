@@ -24,7 +24,7 @@ def conversation_log(limit: int = 20, *, ctx: ToolContext) -> str:
     take = max(1, min(int(limit), 100))
     lines: list[str] = []
     for msg in messages[-take:]:
-        role = "User" if msg.role == "user" else "Bob"
+        role = "User" if msg.role == "user" else "BOB"
         text = (msg.content or "").strip().replace("\n", " ")
         if len(text) > 160:
             text = text[:157] + "..."

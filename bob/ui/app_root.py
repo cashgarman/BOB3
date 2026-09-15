@@ -4,9 +4,8 @@ import sys
 
 import customtkinter as ctk
 
-from bob.debug_log import dbg
 from bob.ui import theme as theming
-from bob.win32_app import hide_from_taskbar, window_debug_snapshot
+from bob.win32_app import hide_from_taskbar
 
 
 class AppRoot(ctk.CTk):
@@ -31,15 +30,6 @@ class AppRoot(ctk.CTk):
                 pass
         hide_from_taskbar(self)
         self.update_idletasks()
-        # #region agent log
-        dbg(
-            "app_root.py:__init__",
-            "tray root initialized",
-            data=window_debug_snapshot(self),
-            hypothesis_id="T1",
-            run_id="tray-v7",
-        )
-        # #endregion
 
     def ui(self, fn) -> None:
         self.after(0, fn)

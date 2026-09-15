@@ -15,6 +15,12 @@ PARAKEET_ALIASES = {
 }
 PARAKEET_MODEL = "nemo-parakeet-tdt-0.6b-v3"
 PARAKEET_HF_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx"
+PARAKEET_REQUIRED_FILES = ("config.json", "vocab.txt")
+
+
+def parakeet_model_ready(path: Path) -> bool:
+    root = Path(path)
+    return all((root / name).is_file() for name in PARAKEET_REQUIRED_FILES)
 
 
 def is_parakeet(name: str) -> bool:
@@ -84,7 +90,7 @@ class ParakeetSTT:
         fetch from Hugging Face, so we populate the folder ourselves first.
         """
         self.download_root.mkdir(parents=True, exist_ok=True)
-        if (self.download_root / "config.json").is_file():
+        if parakeet_model_ready(self.download_root):
             return self.download_root
         from huggingface_hub import snapshot_download
 

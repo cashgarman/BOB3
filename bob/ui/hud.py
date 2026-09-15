@@ -17,7 +17,7 @@ class TalkHud(ctk.CTkToplevel):
     def __init__(self, master: ctk.CTk, hotkey: str) -> None:
         super().__init__(master)
         theme = theming.current()
-        self.title("Bob")
+        self.title("BOB")
         self.resizable(True, True)
         self.minsize(420, 260)
         self.configure(**theme.window())
@@ -31,6 +31,7 @@ class TalkHud(ctk.CTkToplevel):
         self._messages: list[dict] = []
         self._pending_user = ""
         self._pending_reply = ""
+        self._pending_thought = ""
 
         self.status = set_role(
             ctk.CTkLabel(
@@ -93,10 +94,12 @@ class TalkHud(ctk.CTkToplevel):
         messages: Sequence[dict],
         pending_user: str = "",
         pending_reply: str = "",
+        pending_thought: str = "",
     ) -> None:
         self._messages = list(messages)
         self._pending_user = pending_user
         self._pending_reply = pending_reply
+        self._pending_thought = pending_thought
         self._paint()
 
     def set_user(self, text: str) -> None:
@@ -123,7 +126,13 @@ class TalkHud(ctk.CTkToplevel):
             self.meta.configure(text=f"Speaking  ·  {hotkey.upper()} to send")
 
     def _paint(self) -> None:
-        paint_transcript(self.body, self._messages, self._pending_user, self._pending_reply)
+        paint_transcript(
+            self.body,
+            self._messages,
+            self._pending_user,
+            self._pending_reply,
+            self._pending_thought,
+        )
 
     def _place(self) -> None:
         self.update_idletasks()

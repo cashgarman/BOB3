@@ -20,16 +20,16 @@ def _already_running_notice() -> None:
 
         ctypes.windll.user32.MessageBoxW(
             None,
-            "Bob is already running. Look for its icon in the system tray.",
-            "Bob",
+            "BOB is already running. Look for its icon in the system tray.",
+            "BOB",
             0x40,  # MB_ICONINFORMATION
         )
     except Exception:
-        print("Bob is already running.", file=sys.stderr)
+        print("BOB is already running.", file=sys.stderr)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Bob local voice assistant")
+    parser = argparse.ArgumentParser(description="BOB local voice assistant")
     parser.add_argument(
         "--check",
         action="store_true",
@@ -49,15 +49,15 @@ def main() -> int:
 
     guard = SingleInstance()
     if guard.already_running:
-        log.warning("Another Bob instance already owns the mutex; exiting")
+        log.warning("Another BOB instance already owns the mutex; exiting")
         _already_running_notice()
         return 2
-    log.info("Bob starting (log: %s)", log_path)
+    log.info("BOB starting (log: %s)", log_path)
     try:
         Assistant().run()
     finally:
         guard.release()
-        log.info("Bob exited")
+        log.info("BOB exited")
     return 0
 
 

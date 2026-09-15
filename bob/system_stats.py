@@ -8,8 +8,6 @@ import time
 from dataclasses import dataclass
 from ctypes import wintypes
 
-from bob.debug_log import dbg
-
 
 @dataclass(frozen=True)
 class UsageStats:
@@ -42,7 +40,6 @@ _CACHED = UsageStats()
 _NVML = None
 _NVML_DEVICE = None
 _NVML_FAILED = False
-_SAMPLE_LOGS = 0
 
 
 class UsageSampler:
@@ -63,18 +60,6 @@ class UsageSampler:
         cpu = _cpu_usage(self)
         self._last = UsageStats(gpu=gpu, vram=vram, cpu=cpu)
         self._last_at = now
-        # #region agent log
-        global _SAMPLE_LOGS
-        if _SAMPLE_LOGS < 8:
-            _SAMPLE_LOGS += 1
-            dbg(
-                "system_stats.py:sample",
-                "usage sample",
-                data={"source": source, "gpu": gpu, "vram": vram, "cpu": cpu, "n": _SAMPLE_LOGS},
-                hypothesis_id="S1",
-                run_id="tray-v8",
-            )
-        # #endregion
         return self._last
 
 
@@ -170,20 +155,6 @@ def _hidden_subprocess_kwargs() -> dict:
 def _nvidia_smi_usage() -> tuple[float | None, float | None]:
     try:
         kwargs = _hidden_subprocess_kwargs()
-        # #region agent log
-        global _SAMPLE_LOGS
-        if _SAMPLE_LOGS < 8:
-            dbg(
-                "system_stats.py:_nvidia_smi_usage",
-                "spawning nvidia-smi",
-                data={
-                    "creationflags": kwargs.get("creationflags"),
-                    "has_startupinfo": "startupinfo" in kwargs,
-                },
-                hypothesis_id="S1",
-                run_id="tray-v8",
-            )
-        # #endregion
         out = subprocess.check_output(
             [
                 "nvidia-smi",

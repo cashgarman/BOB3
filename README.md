@@ -35,6 +35,38 @@ Or double-click `install.bat`. This creates a branded `Bob.exe`, a Start Menu sh
 
 removes the Windows app registration. It does not delete this folder, `.venv`, or downloaded models.
 
+To remove many broken or duplicate installs (especially when Apps & Features fails with `Config.Msi` / Error 5 on a non-C: drive):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\cleanup-bob-installs.ps1 -Drive I: -Force
+```
+
+If BOB still appears in **Settings → Apps** after cleanup, the MSI entries are probably under **HKLM**. Run elevated:
+
+```powershell
+Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File .\cleanup-bob-installs.ps1 -RegistryOnly -Force'
+```
+
+Add `-WhatIf` to preview. Use `-ClearSetupCache` to also remove the embedded-installer extract cache.
+
+## Turn-key installer (MSI / Burn)
+
+Build a per-user installer folder under `installer\out\`. `BobSetup.exe` is a dark-themed setup UI that lets the user choose where Bob and all dependencies are installed, then runs Ollama (if needed), copies Bob files, downloads Python/PyPI packages, and launches the setup wizard. Large dependencies are downloaded on the target PC, keeping the MSI small (Bob source + scripts only).
+
+Prerequisites on the build machine: [WiX Toolset 3.14+](https://wixtoolset.org/), Python 3.12 (project `.venv` from `setup.ps1`), and .NET Framework (`csc.exe`).
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\installer\scripts\build.ps1
+```
+
+Run `installer\out\BobSetup.exe` on the target PC (no admin, internet required for first install). **Distribute `BobSetup.exe` alone** — it embeds `Bob.msi`, helper EXEs, `logo.png`, and `license.rtf`. On first run it extracts those files to `%LOCALAPPDATA%\BOB\setup\payload-cache\`. The setup UI asks for an install folder, shows download sizes/speed/ETA during dependency setup, then runs the model wizard. Existing Ollama and Python 3.12 installs are detected and skipped when possible. Ollama is left installed if the user later removes Bob from Apps & Features. NVIDIA GPU drivers are not bundled.
+
+Silent install (uses the VRAM recommendation, default hotkey, and Start with Windows):
+
+```powershell
+.\installer\out\BobSetup.exe /quiet
+```
+
 ## Run
 
 ```powershell

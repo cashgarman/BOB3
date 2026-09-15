@@ -7,6 +7,40 @@ from bob.ui.transcript import paint_transcript
 from tests.helpers import pump, transcript_text
 
 
+def test_compose_internal_thought_includes_filtered_monologue():
+    from bob.llm import _compose_internal_thought
+
+    raw = (
+        "Okay, the user is asking for the current time. Let me think about how to handle this. "
+        'Bob should say "It\'s 1:03 PM, Cash."'
+    )
+    thought = _compose_internal_thought("", raw, "It's 1:03 PM, Cash.", "What time is it?")
+    assert "Okay, the user is asking" in thought
+
+
+def test_paint_transcript_shows_internal_thought(ui):
+    box = ctk.CTkTextbox(ui)
+    theming.set_current(theming.preset("midnight"))
+    paint_transcript(
+        box,
+        [
+            {"role": "user", "content": "What time is it?"},
+            {
+                "role": "assistant",
+                "content": "It's 1:03 PM.",
+                "thought": "Called get_current_time directly (skipped LLM).",
+            },
+        ],
+        pending_thought="Checking tool results…",
+        pending_reply="It's 1:03 PM.",
+    )
+    text = transcript_text(box)
+    assert "Thinking: Called get_current_time directly (skipped LLM)." in text
+    assert "Thinking: Checking tool results…" in text
+    assert "BOB: It's 1:03 PM." in text
+    box.destroy()
+
+
 def test_paint_transcript_roles_and_empty(ui):
     box = ctk.CTkTextbox(ui)
     theming.set_current(theming.preset("midnight"))
@@ -25,10 +59,10 @@ def test_paint_transcript_roles_and_empty(ui):
     )
     text = transcript_text(box)
     assert "You: hi" in text
-    assert "Bob: —" in text
-    assert "Bob: there" in text
+    assert "BOB: —" in text
+    assert "BOB: there" in text
     assert "You: partial" in text
-    assert "Bob: draft" in text
+    assert "BOB: draft" in text
     assert str(box.cget("state")) == "disabled"
     box.destroy()
 

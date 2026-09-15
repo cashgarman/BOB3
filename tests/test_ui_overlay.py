@@ -8,7 +8,7 @@ from tests.helpers import find_widget, pump, transcript_text
 
 
 def test_overlay_initial_state(ui):
-    assert ui.title() == "Bob"
+    assert ui.title() == "BOB"
     assert "LOADING" not in ui.status.cget("text") or True
     ui.set_state(State.IDLE)
     pump(ui)
@@ -39,9 +39,9 @@ def test_overlay_transcript_history_and_pending(ui):
     pump(ui)
     text = transcript_text(ui.transcript)
     assert "You: Hi" in text
-    assert "Bob: Hello" in text
+    assert "BOB: Hello" in text
     assert "You: Typing…" in text
-    assert "Bob: Thinking…" in text
+    assert "BOB: Thinking…" in text
 
 
 def test_overlay_empty_transcript_shows_placeholder(ui):

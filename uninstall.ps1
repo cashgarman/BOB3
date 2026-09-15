@@ -3,6 +3,7 @@ Set-Location $PSScriptRoot
 
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 if (Test-Path $python) {
+    & $python -c "from bob.startup import disable; disable()"
     & $python (Join-Path $PSScriptRoot "packaging\install.py") --uninstall
     exit $LASTEXITCODE
 }

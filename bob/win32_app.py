@@ -6,13 +6,15 @@ import sys
 from pathlib import Path
 
 APP_ID = "Cash.Bob"
-APP_NAME = "Bob"
-PUBLISHER = "Bob"
+APP_NAME = "BOB"
+PUBLISHER = "BOB"
 EXE_NAME = "Bob.exe"
 
 
 def project_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    from bob.paths import project_root as _root
+
+    return _root()
 
 
 def icon_path() -> Path:
@@ -30,6 +32,46 @@ def apply_process_app_id() -> None:
         import ctypes
 
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    except Exception:
+        return
+    ensure_tray_registration()
+
+
+def preferred_launch_exe() -> Path:
+    """Bob.exe host when built; pythonw only for dev trees without a branded exe."""
+    branded = branded_exe()
+    if branded.is_file():
+        return branded
+    return project_root() / ".venv" / "Scripts" / "pythonw.exe"
+
+
+def launch_arguments(exe: Path) -> str:
+    if exe.name.lower() == EXE_NAME.lower():
+        return ""
+    return "-m bob"
+
+
+def ensure_tray_registration() -> None:
+    """Keep Settings → tray list showing BOB (not Python) for the branded exe."""
+    if sys.platform != "win32":
+        return
+    exe = branded_exe()
+    if not exe.is_file():
+        return
+    try:
+        import importlib.util
+
+        wi = project_root() / "packaging" / "windows_install.py"
+        if not wi.is_file():
+            return
+        spec = importlib.util.spec_from_file_location("windows_install", wi)
+        if spec is None or spec.loader is None:
+            return
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        ico = icon_path()
+        if ico.is_file():
+            mod.register_windows_app(exe, ico, root=project_root())
     except Exception:
         return
 

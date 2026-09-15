@@ -92,7 +92,7 @@ def test_conversation_log_tool(tmp_path: Path):
     out = reg.invoke("conversation_log", {"limit": 5}, ctx=ctx)
     assert "What is the weather today?" in out
     assert "User:" in out
-    assert "Bob:" in out
+    assert "BOB:" in out
     store.close()
     reg.close()
 

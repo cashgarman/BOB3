@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <?include Variables.wxi ?>
+  <Product
+      Id="*"
+      Name="$(var.ProductName)"
+      Language="1033"
+      Version="$(var.ProductVersion)"
+      Manufacturer="$(var.Manufacturer)"
+      UpgradeCode="$(var.UpgradeCode)">
+    <Package
+        InstallerVersion="500"
+        Compressed="yes"
+        InstallScope="perUser"
+        InstallPrivileges="limited"
+        Description="BOB voice assistant"
+        Comments="Per-user install" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of BOB is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" MaximumUncompressedMediaSize="200" />
+
+    <Property Id="MSIINSTALLPERUSER" Value="1" />
+    <Property Id="DESKTOPSHORTCUT" Value="0" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="INSTALLFOLDER" Name="BOB" />
+    </Directory>
+
+    <Feature Id="ProductFeature" Title="BOB" Level="1">
+      <ComponentGroupRef Id="PayloadComponents" />
+      <ComponentRef Id="InstallFolderMarker" />
+    </Feature>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="InstallFolderMarker" Guid="B7E21C90-4A18-4D6F-9C31-8E2A5F7B0D44">
+        <RegistryValue
+            Root="HKCU"
+            Key="Software\Bob"
+            Name="InstallFolder"
+            Type="string"
+            Value="[INSTALLFOLDER]"
+            KeyPath="yes" />
+        <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+      </Component>
+    </DirectoryRef>
+
+    <CustomAction
+        Id="SetRunPostUninstall"
+        Property="RunPostUninstall"
+        Value="&quot;powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]packaging\msi_postinstall.ps1&quot; -InstallFolder [INSTALLFOLDER] -Uninstall" />
+    <CustomAction
+        Id="RunPostUninstall"
+        BinaryKey="WixCA"
+        DllEntry="WixQuietExec64"
+        Execute="deferred"
+        Impersonate="yes"
+        Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="SetRunPostUninstall" Before="RemoveFiles">Installed AND REMOVE~="ALL"</Custom>
+      <Custom Action="RunPostUninstall" After="SetRunPostUninstall">Installed AND REMOVE~="ALL"</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>

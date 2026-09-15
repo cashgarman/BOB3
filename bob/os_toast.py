@@ -240,7 +240,33 @@ def _ensure_shortcut() -> None:
         _release(obj)
 
 
-def _show_winrt(title: str, message: str, *, replace: bool) -> None:
+def _message_text_nodes(message: str) -> str:
+    lines = [ln.strip() for ln in message.splitlines() if ln.strip()]
+    if not lines:
+        lines = [message.strip()]
+    return "".join(f"<text>{escape(ln)}</text>" for ln in lines if ln)
+
+
+def prefetch() -> None:
+    """Create shortcut/AUMID early so the first toast can pop immediately."""
+    if sys.platform != "win32":
+        return
+    try:
+        _ensure_runtime()
+        _register_aumid()
+        _ensure_shortcut()
+    except Exception:
+        log.exception("Toast prefetch failed")
+
+
+def _show_winrt(
+    title: str,
+    message: str,
+    *,
+    replace: bool,
+    silent: bool = False,
+    tag: str | None = None,
+) -> None:
     from bob.win32_app import APP_ID, apply_process_app_id
 
     apply_process_app_id()
@@ -254,9 +280,10 @@ def _show_winrt(title: str, message: str, *, replace: bool) -> None:
     combase = _combase()
     xml_text = (
         '<toast duration="long">'
-        "<visual><binding template=\"ToastGeneric\">"
+        + ('<audio silent="true"/>' if silent else "")
+        + "<visual><binding template=\"ToastGeneric\">"
         f"<text>{escape(title)}</text>"
-        f"<text>{escape(message)}</text>"
+        f"{_message_text_nodes(message)}"
         "</binding></visual></toast>"
     )
 
@@ -314,10 +341,11 @@ def _show_winrt(title: str, message: str, *, replace: bool) -> None:
             raise OSError(hr, f"CreateToastNotification 0x{hr & 0xFFFFFFFF:08X}")
         toast = int(toast_ptr.value)
 
-        if replace:
+        toast_tag = tag or ("bob-load" if replace else None)
+        if toast_tag:
             try:
                 toast2 = _qi(toast, IID_IToastNotification2)
-                hs_tag = _hstring("bob-load", combase)
+                hs_tag = _hstring(toast_tag, combase)
                 hs_group = _hstring("bob", combase)
                 try:
                     _call(toast2, 6, HRESULT, [HSTRING], hs_tag)  # put_Tag
@@ -339,22 +367,31 @@ def _show_winrt(title: str, message: str, *, replace: bool) -> None:
                 combase.WindowsDeleteString(hs)
 
 
-def show(message: str, title: str = "Bob", *, replace: bool = True) -> None:
+def show(
+    message: str,
+    title: str = "BOB",
+    *,
+    replace: bool = True,
+    silent: bool = False,
+    tag: str | None = None,
+) -> bool:
     """Show a Windows toast. Safe to call from any thread; never raises."""
     global _inited, _ok
     if sys.platform != "win32":
-        return
+        return False
     text = (message or "").strip()
     if not text:
-        return
-    heading = (title or "Bob").strip() or "Bob"
+        return False
+    heading = (title or "BOB").strip() or "BOB"
     try:
-        _show_winrt(heading, text, replace=replace)
+        _show_winrt(heading, text, replace=replace, silent=silent, tag=tag)
         _ok = True
         if not _inited:
             _inited = True
         log.info("toast: %s — %s", heading, text)
+        return True
     except Exception:
         log.exception("Windows toast failed (%s: %s)", heading, text)
         _inited = True
         _ok = False
+        return False

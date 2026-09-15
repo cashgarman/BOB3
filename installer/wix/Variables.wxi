@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Include>
+  <?define ProductName = "BOB" ?>
+  <?define ProductVersion = "0.1.0" ?>
+  <?define Manufacturer = "BOB" ?>
+  <?define UpgradeCode = "8F3C1A7E-6B2D-4E91-9C4A-2D8F7B1E5A30" ?>
+  <?define BundleUpgradeCode = "3D9A4C12-8E76-4B5F-A1C0-9F2E6D8B4A71" ?>
+  <?define PythonVersion = "3.12.10" ?>
+  <?define PythonInstaller = "python-3.12.10-amd64.exe" ?>
+  <?define PythonUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" ?>
+  <?define OllamaSetup = "OllamaSetup.exe" ?>
+  <?define OllamaUrl = "https://github.com/ollama/ollama/releases/latest/download/OllamaSetup.exe" ?>
+  <?define DefaultLlm = "qwen3:4b" ?>
+  <?define MinFreeGb = "15" ?>
+</Include>

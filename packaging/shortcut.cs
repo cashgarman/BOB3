@@ -91,7 +91,7 @@ namespace Bob
             string workdir = args[3];
             string icon = args[4];
             string appId = args[5];
-            string description = args.Length > 6 ? args[6] : "Bob";
+            string description = args.Length > 6 ? args[6] : "BOB";
 
             Directory.CreateDirectory(Path.GetDirectoryName(lnk) ?? ".");
 

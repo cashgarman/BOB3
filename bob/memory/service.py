@@ -62,7 +62,7 @@ class MemoryService:
         lines = [ln for ln in lines if ln]
         if not lines:
             return ""
-        return "Known about the user:\n" + "\n".join(f"- {ln}" for ln in lines)
+        return "Background for you only — do not repeat aloud:\n" + "\n".join(f"- {ln}" for ln in lines)
 
     def ingest(self, user_text: str, assistant_text: str, generate) -> list[str]:
         if not self.ready:

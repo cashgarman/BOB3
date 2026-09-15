@@ -53,7 +53,7 @@ class SettingsDialog(ctk.CTkToplevel):
     ) -> None:
         super().__init__(master)
         theme = theming.current()
-        self.title("Bob settings")
+        self.title("BOB settings")
         from bob.win32_app import apply_tk_icon
 
         apply_tk_icon(self)
@@ -101,7 +101,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._check(frame, "Voice barge-in", "barge_in")
         self._hint(
             frame,
-            "Barge-in assumes headphones. On speakers Bob will hear himself and cut off.",
+            "Barge-in assumes headphones. On speakers BOB will hear himself and cut off.",
         )
         self._entry(frame, "Barge-in speech (ms)", "barge_in_speech_ms")
         self._entry(frame, "STT partial interval (ms)", "stt_partial_interval_ms")

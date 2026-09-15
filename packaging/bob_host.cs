@@ -6,11 +6,11 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("Bob")]
-[assembly: AssemblyProduct("Bob")]
-[assembly: AssemblyDescription("Bob")]
-[assembly: AssemblyCompany("Bob")]
-[assembly: AssemblyCopyright("Bob")]
+[assembly: AssemblyTitle("BOB")]
+[assembly: AssemblyProduct("BOB")]
+[assembly: AssemblyDescription("BOB voice assistant")]
+[assembly: AssemblyCompany("BOB")]
+[assembly: AssemblyCopyright("BOB")]
 [assembly: AssemblyFileVersion("0.1.0.0")]
 [assembly: AssemblyInformationalVersion("0.1.0")]
 
@@ -138,7 +138,7 @@ namespace Bob
 
         static void Fail(string message)
         {
-            MessageBox.Show(message, "Bob", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(message, "BOB", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 }

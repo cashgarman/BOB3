@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import sys
 import threading
 import time
 
@@ -32,7 +33,6 @@ from bob.ui.theme import Theme
 from bob.ui.theme_dialog import ThemeDialog
 from bob.ui.tray import Tray
 from bob.system_stats import sample_usage
-from bob.debug_log import dbg
 from bob.util import gpu_memory_line, split_speakable
 from bob.vad import Endpointer
 from bob.latency import TurnTimer
@@ -47,6 +47,7 @@ RESTART_FIELDS = {"stt_model", "stt_compute_type", "sample_rate"}
 MAX_SHOWN_MESSAGES = 60
 # Ignore hotkey/tray/toast toggles that land closer together than this.
 TOGGLE_DEBOUNCE_SEC = 0.25
+TTS_ECHO_COOLDOWN_SEC = 1.25
 MODELS_CACHE_SEC = 20.0
 
 _LOAD_TOAST = {
@@ -89,6 +90,7 @@ class Assistant:
         self._chunk_q: queue.Queue = queue.Queue(maxsize=64)
         self._endpoint_armed = False
         self._barge_armed = False
+        self._echo_gate_until = 0.0
         self.root: AppRoot | None = None
         self.overlay: Overlay | None = None
         self.hud: TalkHud | None = None
@@ -106,6 +108,7 @@ class Assistant:
         self._turns = [{"role": m.role, "content": m.content} for m in self.chat.list_messages(self._session_id)]
         self._pending_user = ""
         self._pending_reply = ""
+        self._pending_thought = ""
         self.audio = AudioHub(
             sample_rate=self.settings.sample_rate,
             input_device=self.settings.input_device or None,
@@ -181,6 +184,14 @@ class Assistant:
         threading.Thread(target=self._boot_worker, name="boot", daemon=True).start()
 
     def _boot_worker(self) -> None:
+        if sys.platform == "win32":
+            try:
+                from bob.os_toast import prefetch
+
+                prefetch()
+            except Exception:
+                pass
+
         def status(msg: str) -> None:
             detail = _load_toast_text(msg) or msg
             self._set_state(State.LOADING, detail)
@@ -258,19 +269,38 @@ class Assistant:
             self._set_state(State.IDLE, detail)
             if self.tray:
                 self._ui(self.tray.refresh)
-            self._notify_ready(detail)
+            self._ui(lambda: self._notify_ready(detail))
             log.info("Ready: %s", detail)
         except Exception as exc:
             log.exception("Boot failed")
-            self._toast_load(str(exc), title="Bob failed to start")
+            self._toast_load(str(exc), title="BOB failed to start")
             self._set_state(State.ERROR, str(exc)[:80])
             self._surface_note(str(exc))
 
     def _notify_ready(self, detail: str = "") -> None:
-        del detail
+        if self._ready_toast_sent:
+            return
+
+        hotkey = self.settings.hotkey.upper()
+        lines = [f"Press {hotkey} to talk."]
+        if detail.strip():
+            lines.append(detail.strip())
+        message = "\n".join(lines)
+        title = "BOB is ready"
+        from bob.os_toast import show as os_toast
+
+        shown = os_toast(
+            message,
+            title=title,
+            replace=False,
+            silent=True,
+            tag="bob-ready",
+        )
+        if not shown and self.tray:
+            self.tray.notify(message.replace("\n", " — "), title)
         self._ready_toast_sent = True
 
-    def _toast_load(self, msg: str, title: str = "Bob is loading") -> None:
+    def _toast_load(self, msg: str, title: str = "BOB is loading") -> None:
         text = _load_toast_text(msg)
         if not text:
             return
@@ -350,7 +380,7 @@ class Assistant:
     def apply_setting(self, field: str, value) -> None:
         if field in RESTART_FIELDS and str(getattr(self.settings, field)) != str(value):
             self.settings.update(**{field: value})
-            self._surface_note("Saved. Restart Bob to apply this setting.")
+            self._surface_note("Saved. Restart BOB to apply this setting.")
             if self.tray:
                 self.tray.refresh()
             return
@@ -414,7 +444,7 @@ class Assistant:
         if model_changed:
             threading.Thread(target=self._preload_safe, name="preload", daemon=True).start()
         if restart:
-            self._surface_note("Some settings need a Bob restart (STT / sample rate).")
+            self._surface_note("Some settings need a BOB restart (STT / sample rate).")
         if self.tray:
             self.tray.refresh()
 
@@ -717,7 +747,12 @@ class Assistant:
             self._commit_assistant_if_needed(self._pending_reply)
             self._cancel_current_turn()
             self._barge_armed = False
+            self._echo_gate_until = time.monotonic() + TTS_ECHO_COOLDOWN_SEC
             self.audio.set_capture_muted(False)
+            try:
+                self.wake.reset()
+            except Exception:
+                pass
             self._set_state(State.IDLE, self._ready_detail())
             self._restore_idle_ui()
 
@@ -748,10 +783,10 @@ class Assistant:
             self._models_cache = (0.0, [])
             if self.tray:
                 self._ui(self.tray.refresh)
-            self._toast_load(f"{self.llm.model} is ready", title="Bob")
+            self._toast_load(f"{self.llm.model} is ready", title="BOB")
         except Exception as exc:
             log.warning("Model preload failed: %s", exc)
-            self._toast_load(f"Model load failed: {exc}", title="Bob")
+            self._toast_load(f"Model load failed: {exc}", title="BOB")
             self._surface_note(f"Model load failed: {exc}")
 
     def reconnect_ollama(self) -> None:
@@ -783,6 +818,7 @@ class Assistant:
             ]
             self._pending_user = ""
             self._pending_reply = ""
+            self._pending_thought = ""
             self.llm.reset()
             self._restore_llm_history()
             self._refresh_talk()
@@ -797,6 +833,7 @@ class Assistant:
         self._turns = []
         self._pending_user = ""
         self._pending_reply = "New conversation."
+        self._pending_thought = ""
         self._refresh_talk()
         if self.tray:
             self.tray.refresh()
@@ -826,7 +863,8 @@ class Assistant:
 
     def _handle_chunk(self, chunk) -> None:
         state = self.state
-        if state == State.IDLE and self.wake.enabled and not self.wake.error:
+        echo_gated = time.monotonic() < self._echo_gate_until
+        if state == State.IDLE and self.wake.enabled and not self.wake.error and not echo_gated:
             self.wake.feed(chunk)
         if state == State.SPEAKING and self.settings.barge_in and self._barge_armed:
             ep = self._barge_endpointer.feed(chunk)
@@ -853,8 +891,11 @@ class Assistant:
             self._ui(self._finish_listen)
 
     def _on_wake(self) -> None:
-        if self.state == State.IDLE:
-            self._ui(self._begin_listen)
+        if self.state != State.IDLE:
+            return
+        if time.monotonic() < self._echo_gate_until:
+            return
+        self._ui(self._begin_listen)
 
     def toggle_listen(self) -> None:
         self._ui(self._toggle_from_ui)
@@ -865,15 +906,6 @@ class Assistant:
             return
         self._last_toggle = now
         state = self.state
-        # #region agent log
-        dbg(
-            "app.py:_toggle_from_ui",
-            "toggle listen",
-            data={"state": state.value},
-            hypothesis_id="H3",
-            run_id="v6",
-        )
-        # #endregion
         if state == State.LOADING:
             return
         if state == State.ERROR:
@@ -882,7 +914,18 @@ class Assistant:
             self._set_state(State.IDLE, self._ready_detail())
             self._restore_idle_ui()
             state = self.state
-        if state in {State.SPEAKING, State.THINKING}:
+        if state == State.THINKING:
+            self._commit_assistant_if_needed(self._pending_reply)
+            self._cancel_current_turn()
+            self._endpoint_armed = False
+            self._barge_armed = False
+            self.audio.stop_listening()
+            self.stt_stream.cancel()
+            self.audio.set_capture_muted(False)
+            self._set_state(State.IDLE, self._ready_detail())
+            self._restore_idle_ui()
+            return
+        if state == State.SPEAKING:
             self._begin_listen()
             return
         if state == State.LISTENING:
@@ -904,6 +947,7 @@ class Assistant:
             list(self._turns[-MAX_SHOWN_MESSAGES:]),
             self._pending_user,
             self._pending_reply,
+            self._pending_thought,
         )
 
     def _surface_note(self, text: str) -> None:
@@ -941,18 +985,23 @@ class Assistant:
         self._pending_reply = text or ""
         self._refresh_talk()
 
+    def _talk_set_thought(self, text: str) -> None:
+        self._pending_thought = text or ""
+        self._refresh_talk()
+
     def _refresh_talk(self) -> None:
         messages = list(self._turns[-MAX_SHOWN_MESSAGES:])
         pending_user = self._pending_user
         pending_reply = self._pending_reply
+        pending_thought = self._pending_thought
 
         def apply() -> None:
             if self._overlay_should_update() and self.overlay:
-                self.overlay.set_transcript(messages, pending_user, pending_reply)
+                self.overlay.set_transcript(messages, pending_user, pending_reply, pending_thought)
             if self.hud:
-                self.hud.set_transcript(messages, pending_user, pending_reply)
+                self.hud.set_transcript(messages, pending_user, pending_reply, pending_thought)
             if self.toast:
-                self.toast.set_transcript(messages, pending_user, pending_reply)
+                self.toast.set_transcript(messages, pending_user, pending_reply, pending_thought)
 
         if self.overlay is None:
             return
@@ -964,11 +1013,16 @@ class Assistant:
         except Exception:
             self._ui(apply)
 
-    def _commit_turn(self, role: str, content: str) -> None:
+    def _commit_turn(self, role: str, content: str, thought: str = "") -> None:
         text = (content or "").strip()
         if not text:
             return
-        self._turns.append({"role": role, "content": text})
+        turn: dict[str, str] = {"role": role, "content": text}
+        if role == "assistant":
+            note = (thought or self._pending_thought or self.llm.last_internal_thought or "").strip()
+            if note:
+                turn["thought"] = note
+        self._turns.append(turn)
         try:
             self.chat.add_message(self._session_id, role, text)
         except Exception:
@@ -977,6 +1031,7 @@ class Assistant:
             self._pending_user = ""
         else:
             self._pending_reply = ""
+            self._pending_thought = ""
         self._refresh_talk()
 
     def _commit_assistant_if_needed(self, text: str) -> bool:
@@ -1011,6 +1066,7 @@ class Assistant:
         self._present_talk("listen")
         self._talk_set_user("")
         self._talk_set_reply("")
+        self._talk_set_thought("")
         hint = "pause to send" if self.settings.auto_endpoint else f"{self.settings.hotkey.upper()} to send"
         self._set_state(State.LISTENING, hint)
 
@@ -1038,15 +1094,6 @@ class Assistant:
         def apply() -> None:
             if self.state == State.LOADING:
                 return
-            # #region agent log
-            dbg(
-                "app.py:submit_text",
-                "submit text",
-                data={"text_len": len(text), "state": self.state.value},
-                hypothesis_id="H3",
-                run_id="v6",
-            )
-            # #endregion
             if self.state == State.ERROR:
                 if getattr(self.stt, "_model", None) is None:
                     return
@@ -1091,12 +1138,11 @@ class Assistant:
 
     def _start_speech(self) -> int:
         epoch = self.speech.begin()
-        if not self.settings.barge_in:
-            self.audio.set_capture_muted(True)
-        else:
-            self.audio.set_capture_muted(False)
-            self._barge_endpointer.reset()
-            self._barge_armed = True
+        # Always mute the mic while BOB talks. Speaker playback otherwise
+        # loops into the mic and barge-in / wake word restart listening.
+        self.audio.set_capture_muted(True)
+        self._barge_armed = False
+        self._echo_gate_until = time.monotonic() + 30.0
         detail = self.settings.hotkey.upper() + " to interrupt"
         if self.speech.mood != DEFAULT_MOOD:
             detail = f"{self.speech.mood}  ·  {detail}"
@@ -1123,69 +1169,28 @@ class Assistant:
         committed_assistant = False
         token = cancel or self._cancel
         self._reset_turn_mood()
-        # #region agent log
-        dbg(
-            "app.py:_pipeline",
-            "pipeline start",
-            data={"typed": bool(typed_text), "state": self.state.value},
-            hypothesis_id="H4",
-            run_id="v6",
-        )
-        # #endregion
         try:
             if typed_text:
                 user_text = typed_text.strip()
             else:
                 user_text = self.stt_stream.finalize()
             samples = int(getattr(self.stt_stream, "total_samples", 0) or 0)
-            # #region agent log
-            dbg(
-                "app.py:_pipeline",
-                "after stt",
-                data={
-                    "typed": bool(typed_text),
-                    "user_empty": not bool((user_text or "").strip()),
-                    "user_len": len(user_text or ""),
-                    "samples": samples,
-                    "cancelled": token.is_set(),
-                },
-                hypothesis_id="P1",
-                run_id="tray-v8",
-            )
-            # #endregion
             if token.is_set():
                 return
             too_short = (not typed_text) and samples < self.settings.sample_rate * 0.12
             if too_short and not user_text.strip():
-                # #region agent log
-                dbg(
-                    "app.py:_pipeline",
-                    "abort too short",
-                    data={"samples": samples},
-                    hypothesis_id="P1",
-                    run_id="tray-v8",
-                )
-                # #endregion
                 self._talk_set_user("(too short)")
                 self._set_state(State.IDLE, self._ready_detail())
                 self._ui(self._restore_idle_ui)
                 return
             if not user_text.strip():
-                # #region agent log
-                dbg(
-                    "app.py:_pipeline",
-                    "abort no speech",
-                    data={"samples": samples},
-                    hypothesis_id="P2",
-                    run_id="tray-v8",
-                )
-                # #endregion
                 self._talk_set_user("(no speech detected)")
                 self._set_state(State.IDLE, self._ready_detail())
                 self._ui(self._restore_idle_ui)
                 return
             self._commit_turn("user", user_text)
             self._set_state(State.THINKING, "ollama")
+            self._talk_set_thought("")
             memory_block = ""
             try:
                 memory_block = self.memory.retrieve(user_text, limit=int(self.settings.memory_max_inject))
@@ -1199,6 +1204,7 @@ class Assistant:
                 memory_block=memory_block,
                 tools=self._tool_schemas(),
                 on_tool=lambda name, arguments, t=token: self._run_tool(name, arguments, cancel=t),
+                on_thought=self._talk_set_thought,
                 cancel=token,
                 max_rounds=int(self.settings.max_tool_rounds),
             ):
@@ -1247,21 +1253,17 @@ class Assistant:
                     log.warning("Speech playback ended before completion")
                     self.speech.cancel()
         except Exception as exc:
-            # #region agent log
-            dbg(
-                "app.py:_pipeline",
-                "pipeline error",
-                data={"error": str(exc)},
-                hypothesis_id="H4",
-                run_id="v6",
-            )
-            # #endregion
             self._talk_set_reply(f"Error: {exc}")
             if started:
                 self.speech.cancel()
         finally:
             self._barge_armed = False
+            self._echo_gate_until = time.monotonic() + TTS_ECHO_COOLDOWN_SEC
             self.audio.set_capture_muted(False)
+            try:
+                self.wake.reset()
+            except Exception:
+                pass
             self._reset_turn_mood()
             if not committed_assistant:
                 partial = strip_mood_tags(full).strip()
@@ -1270,21 +1272,6 @@ class Assistant:
             if not token.is_set() and self.state != State.LISTENING:
                 self._set_state(State.IDLE, self._ready_detail())
                 self._ui(self._restore_idle_ui)
-            # #region agent log
-            dbg(
-                "app.py:_pipeline",
-                "pipeline done",
-                data={
-                    "cancelled": token.is_set(),
-                    "state": self.state.value,
-                    "had_reply": bool(strip_mood_tags(full).strip()),
-                    "full_len": len(full or ""),
-                    "user_len": len(user_text or ""),
-                },
-                hypothesis_id="P3",
-                run_id="tray-v8",
-            )
-            # #endregion
             if assistant_text and user_text and self.settings.memory_autosave:
                 threading.Thread(
                     target=self._ingest_memory,
@@ -1294,15 +1281,20 @@ class Assistant:
                 ).start()
 
     def _prefetch_tool_context(self, user_text: str, memory_block: str) -> str:
-        from bob.llm import needs_conversation_log
+        from bob.llm import needs_conversation_log, needs_current_time
 
-        if not self.settings.tools_enabled or "conversation_log" not in self.tools.names():
+        blocks: list[str] = []
+        if self.settings.tools_enabled:
+            ctx = self.tools.context(chat=self.chat, session_id=self._session_id)
+            if needs_conversation_log(user_text) and "conversation_log" in self.tools.names():
+                log_text = self.tools.invoke("conversation_log", {"limit": 40}, ctx=ctx)
+                blocks.append(f"Conversation log (for this chat):\n{log_text}")
+            if needs_current_time(user_text) and "get_current_time" in self.tools.names():
+                now = self.tools.invoke("get_current_time", {}, ctx=ctx)
+                blocks.append(f"Current local time: {now}")
+        if not blocks:
             return memory_block
-        if not needs_conversation_log(user_text):
-            return memory_block
-        ctx = self.tools.context(chat=self.chat, session_id=self._session_id)
-        log_text = self.tools.invoke("conversation_log", {"limit": 40}, ctx=ctx)
-        block = f"Conversation log (for this chat):\n{log_text}"
+        block = "\n\n".join(blocks)
         if memory_block.strip():
             return f"{block}\n\n{memory_block.strip()}"
         return block
@@ -1435,14 +1427,34 @@ def run_check() -> int:
     except Exception as exc:
         print(f"ollama: FAILED ({exc})")
         return 1
-    stt = SpeechToText(settings.stt_model, settings.stt_compute_type, MODELS_DIR / "whisper")
-    print("whisper: loading ...")
-    stt.load()
-    print(f"whisper: {stt.model_name} on {stt.device} ({stt.compute_type})")
+    stt = create_speech_to_text(settings.stt_model, settings.stt_compute_type, MODELS_DIR)
+    print("stt:     loading ...")
+    try:
+        stt.load()
+    except Exception as exc:
+        from bob.stt_parakeet import is_parakeet
+
+        if not is_parakeet(settings.stt_model):
+            print(f"stt:     FAILED ({exc})")
+            return 1
+        log.warning("Parakeet failed (%s); falling back to Whisper large-v3-turbo", exc)
+        from bob.stt import SpeechToText
+
+        stt = SpeechToText(
+            "large-v3-turbo",
+            settings.stt_compute_type,
+            MODELS_DIR / "whisper",
+        )
+        try:
+            stt.load()
+        except Exception as fallback_exc:
+            print(f"stt:     FAILED ({fallback_exc})")
+            return 1
+    print(f"stt:     {stt.model_name} on {stt.device} ({stt.compute_type})")
     tts = TextToSpeech(MODELS_DIR / "kokoro", settings.tts_voice, settings.tts_speed)
     print("kokoro:  loading ...")
     tts.load(on_status=print)
-    samples, sr = tts.synthesize("Bob is ready.")
+    samples, sr = tts.synthesize("BOB is ready.")
     print(f"kokoro:  {len(samples)} samples @ {sr} Hz")
     import asyncio
     import numpy as np
@@ -1463,7 +1475,7 @@ def run_check() -> int:
     print(f"stt:     partial interval {settings.stt_partial_interval_ms} ms")
     t0 = time.perf_counter()
     stt.transcribe(np.zeros(int(settings.sample_rate * 1.0), dtype=np.float32), settings.sample_rate)
-    print(f"whisper: 1s decode {(time.perf_counter() - t0) * 1000:.0f} ms")
+    print(f"stt:     1s decode {(time.perf_counter() - t0) * 1000:.0f} ms")
     t0 = time.perf_counter()
     speech_regions(np.zeros(settings.sample_rate, dtype=np.float32), sample_rate=settings.sample_rate)
     print(f"vad:     {(time.perf_counter() - t0) * 1000:.0f} ms / 1s audio")

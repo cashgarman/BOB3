@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+  <?include Variables.wxi ?>
+  <Bundle
+      Name="$(var.ProductName)"
+      Version="$(var.ProductVersion)"
+      Manufacturer="$(var.Manufacturer)"
+      UpgradeCode="$(var.BundleUpgradeCode)"
+      IconSourceFile="$(var.IconFile)"
+      DisableModify="yes">
+    <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
+      <bal:WixStandardBootstrapperApplication
+          LicenseFile="$(var.LicenseFile)"
+          LogoFile="$(var.LogoFile)"
+          ShowVersion="yes"
+          SuppressOptionsUI="no" />
+    </BootstrapperApplicationRef>
+
+    <Variable Name="InstallFolder" Type="string" Value="[LocalAppDataFolder]Programs\BOB" />
+    <Variable Name="DesktopShortcut" Type="numeric" bal:Overridable="yes" Value="0" />
+
+    <bal:Condition Message="BOB requires Windows 8.1 or later (Windows 10+ recommended).">
+      <![CDATA[Installed OR VersionNT >= v6.3]]>
+    </bal:Condition>
+
+    <!-- Skip Ollama package when a local install or uninstall registry entry exists. -->
+    <util:FileSearch
+        Id="OllamaExeLocal"
+        Variable="OllamaLocalExists"
+        Path="[LocalAppDataFolder]Programs\Ollama\ollama.exe"
+        Result="exists" />
+    <util:RegistrySearch
+        Id="OllamaUninstallKey"
+        Root="HKCU"
+        Key="Software\Microsoft\Windows\CurrentVersion\Uninstall\Ollama"
+        Value="DisplayName"
+        Variable="OllamaRegExists"
+        Result="exists" />
+
+    <Chain DisableSystemRestore="yes">
+      <!-- Lightweight helper (~20 KB): detects Ollama, downloads OllamaSetup.exe on demand, or skips. -->
+      <ExePackage
+          Id="Ollama"
+          Name="InstallOllama.exe"
+          SourceFile="$(var.OutDir)\InstallOllama.exe"
+          DetectCondition="OllamaLocalExists OR OllamaRegExists"
+          PerMachine="no"
+          Vital="yes"
+          Permanent="yes"
+          Compressed="yes"
+          DisplayName="Installing Ollama (1 of 4)…" />
+      <MsiPackage
+          Id="BobApp"
+          Name="Bob.msi"
+          SourceFile="$(var.OutDir)\Bob.msi"
+          DisplayInternalUI="no"
+          Vital="yes"
+          Compressed="yes"
+          Visible="no"
+          DisplayName="Installing Bob (2 of 4)…">
+        <MsiProperty Name="INSTALLFOLDER" Value="[InstallFolder]" />
+        <MsiProperty Name="DESKTOPSHORTCUT" Value="[DesktopShortcut]" />
+      </MsiPackage>
+      <!-- Python/pip must run outside the MSI: nested MSI installers fail with 1618. -->
+      <ExePackage
+          Id="BobPostInstall"
+          Name="RunPostInstall.exe"
+          SourceFile="$(var.OutDir)\RunPostInstall.exe"
+          PerMachine="no"
+          Vital="yes"
+          Permanent="yes"
+          Compressed="yes"
+          DisplayName="Downloading Python and Bob dependencies (3 of 4)…"
+          InstallCommand='--root "[InstallFolder]" --desktop-shortcut [DesktopShortcut]'
+          RepairCommand='--root "[InstallFolder]" --desktop-shortcut [DesktopShortcut]' />
+      <ExePackage
+          Id="SetupWizard"
+          Name="LaunchSetupWizard.exe"
+          SourceFile="$(var.OutDir)\LaunchSetupWizard.exe"
+          PerMachine="no"
+          Vital="yes"
+          Permanent="yes"
+          Compressed="yes"
+          DisplayName="Set up Bob (4 of 4)…"
+          InstallCommand='--root "[InstallFolder]"'
+          RepairCommand='--root "[InstallFolder]"' />
+    </Chain>
+  </Bundle>
+</Wix>

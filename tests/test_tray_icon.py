@@ -37,6 +37,6 @@ def test_uses_animation_only_for_loading_and_thinking():
 
 
 def test_tray_title_for_ready_and_loading():
-    assert tray_title(State.LOADING) == "Bob — Loading"
-    assert tray_title(State.IDLE) == "Bob — Ready"
-    assert tray_title(State.THINKING) == "Bob — Thinking"
+    assert tray_title(State.LOADING) == "BOB — Loading"
+    assert tray_title(State.IDLE) == "BOB — Ready"
+    assert tray_title(State.THINKING) == "BOB — Thinking"

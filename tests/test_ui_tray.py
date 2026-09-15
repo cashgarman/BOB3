@@ -20,7 +20,7 @@ def test_icon_image_fallback_without_file(tmp_path):
 def test_tray_menu_top_actions():
     app = FakeApp()
     tray = Tray(app)
-    click_menu(tray, "Open Bob")
+    click_menu(tray, "Open BOB")
     click_menu(tray, "Toggle listen")
     click_menu(tray, "Stop talking")
     click_menu(tray, "New conversation")
@@ -134,10 +134,10 @@ def test_tray_set_state_updates_icon_and_title():
     tray = Tray(app)
     tray.set_state(State.THINKING, "ollama")
     assert tray._state is State.THINKING
-    assert tray.icon.title.startswith("Bob — Thinking")
+    assert tray.icon.title.startswith("BOB — Thinking")
     tray.set_state(State.IDLE)
     assert tray._state is State.IDLE
-    assert tray.icon.title == "Bob — Ready"
+    assert tray.icon.title == "BOB — Ready"
     tray.stop()
 
 
@@ -153,5 +153,5 @@ def test_tray_menu_contains_expected_sections():
     app = FakeApp()
     tray = Tray(app)
     labels = [item.text for item in iter_menu_items(tray.icon.menu)]
-    for needed in ("Open Bob", "Voice", "Models", "Memory", "Startup", "Appearance", "Quit"):
+    for needed in ("Open BOB", "Voice", "Models", "Memory", "Startup", "Appearance", "Quit"):
         assert needed in labels

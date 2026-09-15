@@ -6,9 +6,10 @@ from typing import Any
 
 import yaml
 
+from bob.paths import project_root
 from bob.prompts import load_system_prompt
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = project_root()
 CONFIG_PATH = ROOT / "config.yaml"
 MODELS_DIR = ROOT / "models"
 DATA_DIR = ROOT / "data"

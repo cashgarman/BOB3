@@ -9,7 +9,6 @@ from collections.abc import Callable, Sequence
 import customtkinter as ctk
 
 from bob.audio import WAVE_BARS
-from bob.debug_log import dbg
 from bob.state import State
 from bob.ui import theme as theming
 from bob.ui.theme import Theme, set_role
@@ -121,6 +120,7 @@ class ListenToast(ctk.CTkToplevel):
         self._messages: list[dict] = []
         self._pending_user = ""
         self._pending_reply = ""
+        self._pending_thought = ""
         self._detail = ""
         self._stat_values: dict[str, float | None] = {"gpu": None, "vram": None, "cpu": None}
         self.overrideredirect(True)
@@ -141,7 +141,7 @@ class ListenToast(ctk.CTkToplevel):
         self.app_name = set_role(
             ctk.CTkLabel(
                 header,
-                text="Bob",
+                text="BOB",
                 font=theme.font(12),
                 text_color=theme.text_muted,
                 anchor="w",
@@ -249,20 +249,6 @@ class ListenToast(ctk.CTkToplevel):
                     return
             except Exception:
                 pass
-        master = self.master
-        # #region agent log
-        dbg(
-            "listen_toast.py:present",
-            "toast present",
-            data={
-                "master_title": getattr(master, "title", lambda: "")(),
-                "master_state": master.state() if master is not None else None,
-                "master_viewable": bool(getattr(master, "winfo_viewable", lambda: False)()),
-            },
-            hypothesis_id="T3",
-            run_id="tray-v7",
-        )
-        # #endregion
         fg = 0
         if sys.platform == "win32":
             import ctypes
@@ -320,10 +306,12 @@ class ListenToast(ctk.CTkToplevel):
         messages: Sequence[dict],
         pending_user: str = "",
         pending_reply: str = "",
+        pending_thought: str = "",
     ) -> None:
         self._messages = list(messages)
         self._pending_user = pending_user
         self._pending_reply = pending_reply
+        self._pending_thought = pending_thought
         self._paint_transcript()
 
     def set_waveform(self, bars: Sequence[float]) -> None:
@@ -375,7 +363,13 @@ class ListenToast(ctk.CTkToplevel):
             )
 
     def _paint_transcript(self) -> None:
-        paint_transcript(self.transcript, self._messages, self._pending_user, self._pending_reply)
+        paint_transcript(
+            self.transcript,
+            self._messages,
+            self._pending_user,
+            self._pending_reply,
+            self._pending_thought,
+        )
 
     def _place(self) -> None:
         left, top, right, bottom = _work_area()

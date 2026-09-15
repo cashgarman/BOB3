@@ -2,13 +2,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from bob.paths import project_root
+
+ROOT = project_root()
 PROMPTS_DIR = ROOT / "prompts"
 
 _FALLBACK_SYSTEM = (
-    "You are Bob, a local voice assistant. Speak in short, natural sentences "
-    "meant to be heard aloud. No markdown, bullet lists, or code fences unless "
-    "the user asks. Keep answers concise."
+    "You are BOB, a local voice assistant. Speak in two or three natural sentences "
+    "meant to be heard aloud. Lead with the answer, then add a brief extra detail. "
+    "No markdown, bullet lists, or code fences unless the user asks. Background notes "
+    "and memory are for your use only — never repeat, summarize, or mention them unless "
+    "the user explicitly asks."
+)
+_FALLBACK_ANSWER = (
+    "You are BOB. Answer in two or three spoken sentences. Give the fact first, "
+    "then one extra detail."
 )
 _FALLBACK_TOOL_GUIDANCE = (
     "You can call tools. Use one only when it gives you something you cannot know on your own, "
@@ -17,6 +25,7 @@ _FALLBACK_TOOL_GUIDANCE = (
     "When the user's feelings or the news call for it, call set_speech_mood first "
     "(calm, warm, upbeat, excited, serious, sad, sorry, whisper, hurried) and then answer; "
     "never say the mood name aloud. "
+    "Never narrate your reasoning, planning, or tool selection aloud. "
     "Never read tool names, arguments, or JSON aloud: once a tool returns, just say the answer "
     "in a short spoken sentence. "
     "Do not tell the user you are checking or looking something up — call the tool silently, "
@@ -38,6 +47,10 @@ def _read(name: str, fallback: str) -> str:
 
 def load_system_prompt() -> str:
     return _read("system.txt", _FALLBACK_SYSTEM)
+
+
+def load_answer_prompt() -> str:
+    return _read("answer.txt", _FALLBACK_ANSWER)
 
 
 def load_tool_guidance() -> str:

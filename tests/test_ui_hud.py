@@ -43,7 +43,7 @@ def test_hud_transcript_and_hotkey(ui):
     pump(ui)
     text = transcript_text(hud.body)
     assert "You: Question" in text
-    assert "Bob: Answer…" in text
+    assert "BOB: Answer…" in text
 
     hud.set_user("partial")
     hud.set_reply("draft")

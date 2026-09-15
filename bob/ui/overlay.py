@@ -5,12 +5,11 @@ from collections.abc import Callable, Sequence
 
 import customtkinter as ctk
 
-from bob.debug_log import dbg
 from bob.state import State
 from bob.ui import theme as theming
 from bob.ui.theme import Theme, set_role
 from bob.ui.transcript import paint_transcript
-from bob.win32_app import hide_from_taskbar, show_in_taskbar, window_debug_snapshot
+from bob.win32_app import hide_from_taskbar, show_in_taskbar
 
 
 class Overlay(ctk.CTkToplevel):
@@ -38,8 +37,9 @@ class Overlay(ctk.CTkToplevel):
         self._messages: list[dict] = []
         self._pending_user = ""
         self._pending_reply = ""
+        self._pending_thought = ""
         self._state = State.LOADING
-        self.title("Bob")
+        self.title("BOB")
         from bob.win32_app import apply_tk_icon
 
         apply_tk_icon(self)
@@ -53,9 +53,24 @@ class Overlay(ctk.CTkToplevel):
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=16, pady=(14, 2))
 
+        title_row = ctk.CTkFrame(header, fg_color="transparent")
+        title_row.pack(side="left", anchor="w")
+        from bob.win32_app import project_root
+
+        logo_file = project_root() / "packaging" / "logo.png"
+        if logo_file.is_file():
+            from PIL import Image
+
+            self._logo_img = ctk.CTkImage(
+                light_image=Image.open(logo_file),
+                dark_image=Image.open(logo_file),
+                size=(28, 28),
+            )
+            ctk.CTkLabel(title_row, image=self._logo_img, text="").pack(side="left", padx=(0, 8))
+
         self.status = set_role(
             ctk.CTkLabel(
-                header,
+                title_row,
                 text="LOADING",
                 font=theme.font(18, "bold"),
                 text_color=theme.state_color(State.LOADING),
@@ -109,15 +124,6 @@ class Overlay(ctk.CTkToplevel):
         else:
             self.withdraw()
             hide_from_taskbar(self)
-            # #region agent log
-            dbg(
-                "overlay.py:__init__",
-                "overlay created hidden",
-                data=window_debug_snapshot(self),
-                hypothesis_id="T2",
-                run_id="tray-v7",
-            )
-            # #endregion
 
     def is_user_visible(self) -> bool:
         return self._user_visible
@@ -171,10 +177,12 @@ class Overlay(ctk.CTkToplevel):
         messages: Sequence[dict],
         pending_user: str = "",
         pending_reply: str = "",
+        pending_thought: str = "",
     ) -> None:
         self._messages = list(messages)
         self._pending_user = pending_user
         self._pending_reply = pending_reply
+        self._pending_thought = pending_thought
         self._paint()
 
     def set_user(self, text: str) -> None:
@@ -195,15 +203,6 @@ class Overlay(ctk.CTkToplevel):
 
     def present(self, *, take_focus: bool = False) -> None:
         if not self._user_visible:
-            # #region agent log
-            dbg(
-                "overlay.py:present",
-                "skipped overlay present",
-                data={"take_focus": take_focus, **window_debug_snapshot(self)},
-                hypothesis_id="T2",
-                run_id="tray-v7",
-            )
-            # #endregion
             return
         try:
             try:
@@ -239,7 +238,13 @@ class Overlay(ctk.CTkToplevel):
         del phase
 
     def _paint(self) -> None:
-        paint_transcript(self.transcript, self._messages, self._pending_user, self._pending_reply)
+        paint_transcript(
+            self.transcript,
+            self._messages,
+            self._pending_user,
+            self._pending_reply,
+            self._pending_thought,
+        )
 
     def show(self) -> None:
         self.set_user_visible(True)
@@ -248,15 +253,6 @@ class Overlay(ctk.CTkToplevel):
         self._user_visible = False
         self.withdraw()
         hide_from_taskbar(self)
-        # #region agent log
-        dbg(
-            "overlay.py:hide",
-            "overlay hidden",
-            data=window_debug_snapshot(self),
-            hypothesis_id="T2",
-            run_id="tray-v7",
-        )
-        # #endregion
         if self.on_hide:
             self.on_hide()
 

@@ -203,7 +203,7 @@ class Tray:
             pass
 
         return pystray.Menu(
-            pystray.MenuItem("Open Bob", lambda *_: self.app.open_main_ui(), default=True),
+            pystray.MenuItem("Open BOB", lambda *_: self.app.open_main_ui(), default=True),
             pystray.MenuItem("Toggle listen", lambda *_: self.app.toggle_listen()),
             pystray.MenuItem("Stop talking", lambda *_: self.app.stop_speaking()),
             bool_item("Show overlay", "show_overlay", self.app.set_overlay_visible),
@@ -296,7 +296,7 @@ class Tray:
     def run_detached(self) -> None:
         self.icon.run_detached()
 
-    def notify(self, message: str, title: str = "Bob") -> None:
+    def notify(self, message: str, title: str = "BOB") -> None:
         """Show an OS balloon/toast from the tray icon."""
         if not getattr(self.icon, "HAS_NOTIFICATION", False):
             return
@@ -304,7 +304,7 @@ class Tray:
         if not text:
             return
         try:
-            self.icon.notify(text[:250], (title or "Bob")[:60])
+            self.icon.notify(text[:250], (title or "BOB")[:60])
         except Exception:
             pass
 

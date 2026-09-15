@@ -12,7 +12,13 @@ if (-not (Test-Path $python)) {
 $env:OLLAMA_MAX_LOADED_MODELS = "1"
 $env:OLLAMA_NUM_PARALLEL = "1"
 $env:OLLAMA_FLASH_ATTENTION = "1"
-$env:OLLAMA_GPU_OVERHEAD = "1610612736"
+$overhead = "1610612736"
+$cfg = Join-Path $PSScriptRoot "config.yaml"
+if (Test-Path $cfg) {
+    $match = Select-String -Path $cfg -Pattern '^\s*ollama_gpu_overhead:\s*(\d+)' | Select-Object -First 1
+    if ($match) { $overhead = $match.Matches[0].Groups[1].Value }
+}
+$env:OLLAMA_GPU_OVERHEAD = $overhead
 
 $nvidia = Join-Path $PSScriptRoot ".venv\Lib\site-packages\nvidia"
 if (Test-Path $nvidia) {
@@ -32,7 +38,22 @@ Stop-BobInstances -ProjectRoot $PSScriptRoot | Out-Null
 
 $bob = Join-Path $PSScriptRoot ".venv\Scripts\Bob.exe"
 $pythonw = Join-Path $PSScriptRoot ".venv\Scripts\pythonw.exe"
-if (Test-Path $bob) { $pythonw = $bob }
-elseif (-not (Test-Path $pythonw)) { $pythonw = $python }
-Write-Host "Bob is in the system tray. Right-click the icon for settings. Quit from the tray."
-Start-Process -FilePath $pythonw -ArgumentList "-m","bob" -WorkingDirectory $PSScriptRoot
+$target = $bob
+$launchArgs = @()
+$useSource = -not (Test-Path $target)
+if (-not $useSource) {
+    $srcMarker = Join-Path $PSScriptRoot "bob\llm.py"
+    if ((Test-Path $srcMarker) -and (Get-Item $srcMarker).LastWriteTime -gt (Get-Item $target).LastWriteTime) {
+        $useSource = $true
+    }
+}
+if ($useSource) {
+    $target = $(if (Test-Path $pythonw) { $pythonw } else { $python })
+    $launchArgs = @("-m", "bob")
+}
+Write-Host "BOB is in the system tray. Right-click the icon for settings. Quit from the tray."
+if ($launchArgs.Count -gt 0) {
+    Start-Process -FilePath $target -ArgumentList $launchArgs -WorkingDirectory $PSScriptRoot
+} else {
+    Start-Process -FilePath $target -WorkingDirectory $PSScriptRoot
+}

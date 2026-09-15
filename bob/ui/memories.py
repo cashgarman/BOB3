@@ -23,7 +23,7 @@ class MemoriesWindow(ctk.CTkToplevel):
     ) -> None:
         super().__init__(master)
         theme = theming.current()
-        self.title("Bob memories")
+        self.title("BOB memories")
         from bob.win32_app import apply_tk_icon
 
         apply_tk_icon(self)

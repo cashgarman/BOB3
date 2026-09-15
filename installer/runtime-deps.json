@@ -1,0 +1,11 @@
+{
+  "python": {
+    "url": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe",
+    "filename": "python-3.12.10-amd64.exe",
+    "md5": "5eddb0b6f12c852725de071ae681dde4"
+  },
+  "ollama": {
+    "url": "https://github.com/ollama/ollama/releases/latest/download/OllamaSetup.exe",
+    "filename": "OllamaSetup.exe"
+  }
+}

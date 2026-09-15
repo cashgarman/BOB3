@@ -82,7 +82,7 @@ def test_toast_transcript(ui):
     pump(ui)
     text = transcript_text(toast.transcript)
     assert "You: Hello" in text
-    assert "Bob: Hi there" in text
+    assert "BOB: Hi there" in text
     toast.destroy()
 
 

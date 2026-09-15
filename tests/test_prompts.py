@@ -1,17 +1,24 @@
 from __future__ import annotations
 
-from bob.prompts import PROMPTS_DIR, load_system_prompt, load_tool_guidance
+from bob.prompts import PROMPTS_DIR, load_answer_prompt, load_system_prompt, load_tool_guidance
 
 
 def test_prompt_files_exist():
     assert (PROMPTS_DIR / "system.txt").is_file()
+    assert (PROMPTS_DIR / "answer.txt").is_file()
     assert (PROMPTS_DIR / "tool_guidance.txt").is_file()
 
 
 def test_load_system_prompt():
     text = load_system_prompt()
-    assert "Bob" in text
+    assert "BOB" in text
     assert "voice assistant" in text
+
+
+def test_load_answer_prompt():
+    text = load_answer_prompt()
+    assert "BOB" in text
+    assert "two or three" in text
 
 
 def test_load_tool_guidance():

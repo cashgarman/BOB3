@@ -30,7 +30,7 @@ function Stop-BobInstances {
                 if (-not $fromVenv -and $cmd -notlike "*$root*") { return }
             }
 
-            Write-Host "Stopping Bob (PID $($_.ProcessId))..."
+            Write-Host "Stopping BOB (PID $($_.ProcessId))..."
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
             $stopped++
         }

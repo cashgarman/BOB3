@@ -35,7 +35,7 @@ COLOR_SLOTS: tuple[tuple[str, str], ...] = (
     ("on_accent", "Text on accent"),
     ("danger", "Danger"),
     ("you", "Transcript: You"),
-    ("bob", "Transcript: Bob"),
+    ("bob", "Transcript: BOB"),
     ("idle", "State: idle"),
     ("listening", "State: listening"),
     ("thinking", "State: thinking"),

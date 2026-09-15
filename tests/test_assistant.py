@@ -47,6 +47,7 @@ def _make_assistant(tmp_path: Path, monkeypatch):
     llm.host = "http://127.0.0.1:11434"
     llm.model = "qwen3:4b"
     llm.history = []
+    llm.last_internal_thought = ""
     llm.chat.return_value = iter(["Hello ", "world."])
     llm.list_models.return_value = [{"name": "qwen3:4b", "size": 1}]
 
@@ -206,6 +207,19 @@ def test_assistant_interrupt_listen_preserves_partial_reply(ui, tmp_path, monkey
         "content": "The weather today is sunny and",
     }
     audio.start_listening.assert_called()
+
+
+def test_start_speech_mutes_capture_even_with_barge_in(ui, tmp_path, monkeypatch):
+    assistant, audio, *_ = _make_assistant(tmp_path, monkeypatch)
+    assistant.overlay = ui
+    assistant.hud = None
+    assistant.toast = None
+    assistant._ui = lambda fn: fn()
+    assistant.settings.barge_in = True
+    assistant._start_speech()
+    audio.set_capture_muted.assert_called_with(True)
+    assert assistant._barge_armed is False
+    assert assistant.state == State.SPEAKING
 
 
 def test_assistant_new_chat_and_load_session(ui, tmp_path, monkeypatch):
@@ -382,18 +396,55 @@ def test_load_toast_text_mapping():
     assert _load_toast_text("") == ""
 
 
-def test_notify_ready_does_not_send_os_toast(tmp_path, monkeypatch):
+def test_run_check_uses_create_speech_to_text():
+    root = Path(__file__).resolve().parent.parent
+    src = (root / "bob" / "app.py").read_text(encoding="utf-8")
+    start = src.index("def run_check")
+    body = src[start:]
+    assert "create_speech_to_text(" in body
+    before_fallback = body.split("from bob.stt import SpeechToText", 1)[0]
+    assert "stt = SpeechToText(" not in before_fallback
+
+
+def test_notify_ready_sends_silent_os_toast(tmp_path, monkeypatch):
     from bob.app import Assistant
     from bob.settings import Settings
 
-    sent: list[tuple[str, str]] = []
+    sent: list[tuple[str, str, bool, bool, str | None]] = []
 
-    def capture(msg, title="Bob is loading", *, replace=True):
-        sent.append((title, msg))
+    def capture(msg, title="BOB is loading", *, replace=True, silent=False, tag=None):
+        sent.append((title, msg, silent, replace, tag))
+        return True
 
     monkeypatch.setattr("bob.os_toast.show", capture)
     assistant = Assistant(settings=Settings())
-    assistant._notify_ready("CTRL+SHIFT+SPACE · llama3")
+    assistant._notify_ready("CTRL+SHIFT+SPACE · qwen3:4b")
     assistant._notify_ready("ignored")
-    assert sent == []
+    assert len(sent) == 1
+    assert sent[0][0] == "BOB is ready"
+    assert "Press" in sent[0][1]
+    assert "CTRL+SHIFT+SPACE" in sent[0][1]
+    assert sent[0][2] is True
+    assert sent[0][3] is False
+    assert sent[0][4] == "bob-ready"
+    assert assistant._ready_toast_sent is True
+
+
+def test_notify_ready_falls_back_to_tray_when_os_toast_fails(monkeypatch):
+    from bob.app import Assistant
+    from bob.settings import Settings
+
+    tray_calls: list[tuple[str, str]] = []
+
+    class FakeTray:
+        def notify(self, message: str, title: str = "BOB") -> None:
+            tray_calls.append((title, message))
+
+    monkeypatch.setattr("bob.os_toast.show", lambda *args, **kwargs: False)
+    assistant = Assistant(settings=Settings())
+    assistant.tray = FakeTray()
+    assistant._notify_ready("CTRL+SHIFT+SPACE · qwen3:4b")
+    assert len(tray_calls) == 1
+    assert tray_calls[0][0] == "BOB is ready"
+    assert "Press" in tray_calls[0][1]
     assert assistant._ready_toast_sent is True

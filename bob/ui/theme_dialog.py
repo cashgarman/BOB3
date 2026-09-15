@@ -56,7 +56,7 @@ class ThemeDialog(ctk.CTkToplevel):
         self._hex_vars: dict[str, ctk.StringVar] = {}
 
         theme = self._draft
-        self.title("Bob theme")
+        self.title("BOB theme")
         from bob.win32_app import apply_tk_icon
 
         apply_tk_icon(self)
@@ -282,7 +282,7 @@ class ThemeDialog(ctk.CTkToplevel):
         self.preview_text.delete("1.0", "end")
         inner.insert("end", "You: ", "you")
         inner.insert("end", "What does this theme look like?\n\n", "body")
-        inner.insert("end", "Bob: ", "bob")
+        inner.insert("end", "BOB: ", "bob")
         inner.insert("end", "Like this.", "body")
         self.preview_text.configure(state="disabled")
 
