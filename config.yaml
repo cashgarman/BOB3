@@ -8,8 +8,8 @@ tts_mood: neutral
 wake_word: hey_jarvis
 wake_word_enabled: true
 wake_threshold: 0.5
-hotkey: ctrl+shift+space
-max_silence_sec: 0.2
+hotkey: ctrl+shift+alt+f5
+max_silence_sec: 0.7
 auto_endpoint: true
 endpoint_silence_ms: 700
 turn_detector: smart_turn

@@ -72,8 +72,9 @@ class Settings:
     theme: str = "midnight"
     theme_overrides: dict[str, str] = field(default_factory=dict)
 
-    def save(self, path: Path = CONFIG_PATH) -> None:
-        path.write_text(yaml.safe_dump(asdict(self), sort_keys=False), encoding="utf-8")
+    def save(self, path: Path | None = None) -> None:
+        target = path or CONFIG_PATH
+        target.write_text(yaml.safe_dump(asdict(self), sort_keys=False), encoding="utf-8")
 
     def update(self, **kwargs: Any) -> None:
         known = {f.name for f in fields(self)}
@@ -85,7 +86,8 @@ class Settings:
         self.save()
 
 
-def load_settings(path: Path = CONFIG_PATH) -> Settings:
+def load_settings(path: Path | None = None) -> Settings:
+    path = path or CONFIG_PATH
     data: dict[str, Any] = {}
     if path.exists():
         loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}

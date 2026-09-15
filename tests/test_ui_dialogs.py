@@ -127,6 +127,47 @@ def test_settings_dialog_hotkey_capture(ui):
         assert dialog.vars["hotkey"].get() == "alt+f"
         assert saved_hotkeys == ["alt+f"]
         assert recording[-1] is False
+    dialog._close()
+    pump(ui)
+    assert saved_hotkeys == ["alt+f", "ctrl+shift+space"]
+
+
+def test_settings_dialog_save_persists_hotkey_and_llm(ui):
+    settings = Settings()
+    saved = []
+    dialog = SettingsDialog(
+        ui,
+        settings,
+        on_save=saved.append,
+        llm_models=["qwen2.5:latest", "llama3.1"],
+        inputs=[],
+        outputs=[],
+    )
+    pump(ui)
+    dialog.vars["hotkey"].set("alt+f9")
+    dialog.vars["llm_model"].set("llama3.1")
+    find_widget(dialog, ctk.CTkButton, text="Save").invoke()
+    pump(ui)
+    assert len(saved) == 1
+    assert saved[0]["hotkey"] == "alt+f9"
+    assert saved[0]["llm_model"] == "llama3.1"
+    assert not dialog.winfo_exists()
+
+
+def test_settings_dialog_refresh_llm_models_keeps_user_pick(ui):
+    settings = Settings(llm_model="qwen2.5:latest")
+    dialog = SettingsDialog(
+        ui,
+        settings,
+        on_save=lambda _v: None,
+        llm_models=["qwen2.5:latest", "llama3.1"],
+        inputs=[],
+        outputs=[],
+    )
+    pump(ui)
+    dialog.vars["llm_model"].set("llama3.1")
+    dialog.refresh_llm_models(["qwen2.5:latest", "llama3.1", "mistral"])
+    assert dialog.vars["llm_model"].get() == "llama3.1"
     dialog.destroy()
 
 

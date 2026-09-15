@@ -29,6 +29,7 @@ _MONOLOGUE_RE = re.compile(
     r"(?:^|\n)\s*(?:okay,?\s+)?(?:the user is|let me think|let me recall|first,?\s+i need to|"
     r"looking at the tools|the tools (?:list|provided|say)|from the known information|"
     r"the instructions say|the tool response|previous response|in previous interactions|"
+    r"we are in the middle|middle of a conversation|"
     r"so bob should|(?:wait|hmm),?\s+(?:the|but|maybe|so)\b)",
     re.IGNORECASE,
 )
@@ -58,6 +59,22 @@ _THIRD_PERSON_SPOKEN_RE = re.compile(
     re.IGNORECASE,
 )
 _FRAGMENT_START_RE = re.compile(r"^(?:but|and|or|also)\b", re.IGNORECASE)
+_META_SPOKEN_RE = re.compile(
+    r"\bsince (?:i am|i'm) an ai\b|\bas an ai,? i\b|\bai model\b|\blanguage model\b|"
+    r"\bin this role\b|\b(?:the )?persona\b|\bas bob\b|\(as bob\)|\(a character\)|"
+    r"\bthe instruction\b|\binstruction says\b|\bgive the fact first\b|\bone extra detail\b|"
+    r'\buse ["\']i["\'] and ["\']you["\']|\bresponded with\b|\bshould be consistent\b|'
+    r"\bno planning\b|\bbackground notes\b|\bcharacter\),|\brole i am\b|"
+    r"\bbut in this role\b|\bmeant to be heard\b",
+    re.IGNORECASE,
+)
+_SPOKEN_OPENER_RE = re.compile(
+    r"^(?:i\b|you\b|that|the|it|this|those|these|there|here|"
+    r"well|sure|yeah|yes|no|nope|sorry|thanks|thank you|hmm|oh|right|maybe|probably|"
+    r"hello|hi|hey|because|honestly|absolutely|not really|good question|let(?:'s| us)|lets|"
+    r"got it|sounds like|fair point|i hear you|i understand|fair enough)\b",
+    re.IGNORECASE,
+)
 _QUOTED_ANSWER_RE = re.compile(r'"([^"\n]{5,160})"')
 _TIME_TOOL_RE = re.compile(
     r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s.+?\s+at\s+"
@@ -80,7 +97,6 @@ _MATH_PLUS_RE = re.compile(
     re.IGNORECASE,
 )
 _COUNT_BACK_RE = re.compile(r"\bcount\s+(?:down\s+|back\s+)?from\s+(\d+)\b", re.IGNORECASE)
-_FEELING_RE = re.compile(r"\bhow (?:are you feeling|do you feel|you feeling)\b", re.IGNORECASE)
 _LOCATION_STATED_RE = re.compile(
     r"^\s*(?:i(?:['’]m| am) (?:in|from)|i live in)\s+(.+?)\s*$",
     re.IGNORECASE,
@@ -573,8 +589,6 @@ def _try_direct_answer(user_text: str) -> str:
     match = _MATH_PLUS_RE.search(t)
     if match:
         return str(int(match.group(1)) + int(match.group(2)))
-    if _FEELING_RE.search(t):
-        return "I'm doing well and ready to help."
     count = _COUNT_BACK_RE.search(t)
     if count:
         n = int(count.group(1))
@@ -590,7 +604,7 @@ def _try_direct_answer(user_text: str) -> str:
 
 _BAD_ANSWER_START_RE = re.compile(
     r"^(?:it covers|i recall(?: that)?|first,?|as bob,?|hmm,?|okay,?|the user|let me|"
-    r"the extra detail|the sky being|i should|we are given|i need to|no extra|"
+    r"the extra detail|the sky being|i should|we are given|we are in|i need to|no extra|"
     r"since they\b|since the user\b|since we are\b|"
     r"so,?|wait,?|better not|best to|\"?\s*so the answer)\b",
     re.IGNORECASE,
@@ -598,8 +612,9 @@ _BAD_ANSWER_START_RE = re.compile(
 _INSTRUCTION_ECHO_RE = re.compile(
     r"\b(no extra commentary|no extra words|direct answer only|spoken sentence|short natural sentence|"
     r"natural sentence ending|give the direct answer|no planning|meta commentary|"
-    r"i must answer|i need to respond|need to respond|"
-    r"respond as bob|one short natural sentence|"
+    r"i must answer|i must reply|i need to respond|need to respond|"
+    r"respond as bob|as bob,? i|one short natural sentence|one or two short sentences?|"
+    r"reply aloud|middle of a conversation|"
     r"keep answers concise|background notes|must phrase it naturally|"
     r"shouldn't repeat|do not summarize aloud|for your use only|"
     r"meant to be heard aloud|say only the answer|speak aloud|what to speak|"
@@ -615,6 +630,28 @@ _INSTRUCTION_MONOLOGUE_RE = re.compile(
 )
 _INCOMPLETE_TAIL_WORDS = frozenset(
     {"also", "and", "but", "so", "then", "or", "just", "like", "with", "without", "plus"}
+)
+_SHORT_SPOKEN_WORDS = frozenset(
+    {
+        "yes",
+        "no",
+        "ok",
+        "okay",
+        "sure",
+        "hello",
+        "hi",
+        "hey",
+        "thanks",
+        "sorry",
+        "maybe",
+        "right",
+        "yep",
+        "nope",
+        "correct",
+        "exactly",
+        "indeed",
+        "absolutely",
+    }
 )
 _PROMPT_ECHO_PHRASES = (
     "keep answers concise",
@@ -641,6 +678,46 @@ def _is_instruction_monologue(text: str) -> bool:
     return bool(_INSTRUCTION_MONOLOGUE_RE.search(text or ""))
 
 
+def _contains_unspoken_meta(text: str) -> bool:
+    return bool(_META_SPOKEN_RE.search(text or ""))
+
+
+def _looks_like_quoted_fragment(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t[0] in "\"'“‘":
+        return True
+    if re.search(r'\s-\sUse ["\']I["\']', t, re.IGNORECASE):
+        return True
+    return False
+
+
+def _starts_like_spoken_reply(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _SPOKEN_OPENER_RE.match(t):
+        return True
+    if re.match(r"^\d", t):
+        return True
+    if re.match(r"^[A-Z][a-z]+ (?:is|are|was|were|has|have|means)\b", t):
+        return True
+    return False
+
+
+def _fallback_spoken_reply(question: str) -> str:
+    """Short safe replies when the model only produces planning text."""
+    t = (question or "").strip().lower()
+    if re.search(r"\bhow (?:are you feeling|do you feel|you feeling)\b", t):
+        return "I'm doing well, thanks for asking."
+    if re.search(r"\bwhat does that mean\b", t):
+        return "I meant I'm here to help you, not talk about how I work."
+    if re.search(r"\b(?:bad responses?|not helpful|terrible|awful|useless|still responding)\b", t):
+        return "You're right — sorry about that. I'll keep it simpler."
+    return ""
+
+
 def _looks_incomplete_spoken(text: str) -> bool:
     t = (text or "").strip()
     if not t:
@@ -657,51 +734,43 @@ def _looks_incomplete_spoken(text: str) -> bool:
 
 def _looks_like_spoken_answer(text: str, question: str = "") -> bool:
     t = (text or "").strip()
-    if not t:
-        return False
-    if is_failure_reply(t):
+    if not t or is_failure_reply(t):
         return False
     if (
         _echoes_prompt(t)
+        or _contains_unspoken_meta(t)
+        or _looks_like_quoted_fragment(t)
         or _INSTRUCTION_ECHO_RE.search(t)
         or _BAD_ANSWER_START_RE.search(t)
         or _is_instruction_monologue(t)
         or _is_planning_reply(t)
         or _looks_like_fragment_tail(t)
         or _looks_incomplete_spoken(t)
+        or _looks_like_meta_reply(t)
+        or _is_internal_monologue(t)
     ):
-        return False
-    if _looks_like_meta_reply(t):
         return False
     if question and _is_useless_reply(t, question):
         return False
     if re.fullmatch(r"\d+\.?", t):
-        if question and (_MATH_PLUS_RE.search(question) or _MATH_TIMES_RE.search(question)):
-            return True
-        return False
-    if _is_internal_monologue(t):
-        return False
+        return bool(
+            question and (_MATH_PLUS_RE.search(question) or _MATH_TIMES_RE.search(question))
+        )
     max_chars = _spoken_max_chars(question)
-    if re.match(r"^I(?:['’]m| am| don'?t| do not| can(?:not|'t)?| would| like| think| feel)\b", t, re.IGNORECASE):
-        if t[-1] in ".!?" and len(t) <= max_chars and not _is_planning_reply(t):
-            return True
-    if _user_wants_bullets(question) and _looks_like_bullet_list(t) and len(t) <= max_chars:
+    if len(t) > max_chars:
+        return False
+    if _user_wants_bullets(question) and _looks_like_bullet_list(t):
         return True
-    if t[-1] in ".!?" and len(t) <= max_chars:
-        words = re.findall(r"[a-z0-9']+", t.lower())
-        if len(words) >= 2:
-            return True
-        if len(words) == 1 and not re.fullmatch(r"\d+\.?", t):
-            return True
-    word_count = len(re.findall(r"[a-z0-9']+", t.lower()))
-    if (
-        len(t) <= min(120, max_chars)
-        and not _looks_incomplete_spoken(t)
-        and not _is_planning_reply(t)
-        and word_count >= (1 if len(t) <= 40 else 2)
-    ):
+    words = re.findall(r"[a-z0-9']+", t.lower())
+    if len(words) == 1 and words[0] in _SHORT_SPOKEN_WORDS and len(t) <= 24:
         return True
-    return False
+    if t[-1] not in ".!?":
+        return False
+    if len(words) < 2 and not re.fullmatch(r"\d+\.?", t):
+        return False
+    if _starts_like_spoken_reply(t):
+        return True
+    return not re.match(r"^(?:since|first|okay|hmm|wait|so)\b", t, re.IGNORECASE)
 
 
 def _looks_complete_answer(text: str) -> bool:
@@ -727,12 +796,29 @@ def _strip_control_tokens(text: str) -> str:
     return _NO_THINK_RE.sub("", text or "").strip()
 
 
+def _echoes_user_text(reply: str, user_text: str) -> bool:
+    """True when the reply mostly repeats what the user just said."""
+    spoken = _normalize_for_compare(reply)
+    asked = _normalize_for_compare(user_text)
+    if not spoken or not asked:
+        return False
+    user_words = asked.split()
+    for size in range(min(10, len(user_words)), 3, -1):
+        for i in range(len(user_words) - size + 1):
+            phrase = " ".join(user_words[i : i + size])
+            if len(phrase) >= 18 and phrase in spoken:
+                return True
+    return False
+
+
 def _is_useless_reply(reply: str, user_text: str) -> bool:
     spoken = _normalize_for_compare(reply)
     asked = _normalize_for_compare(user_text)
     if not spoken:
         return True
     if asked and spoken == asked:
+        return True
+    if asked and _echoes_user_text(reply, user_text):
         return True
     if asked and spoken.endswith(asked) and len(spoken) <= len(asked) + 16:
         return True
@@ -777,6 +863,8 @@ def _is_planning_reply(text: str) -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if _contains_unspoken_meta(t):
+        return True
     if _THIRD_PERSON_SPOKEN_RE.search(t):
         return True
     return bool(_PLANNING_REPLY_RE.search(t)) or _looks_like_meta_reply(t)
@@ -1819,8 +1907,8 @@ class OllamaChat:
             return False
         if _is_planning_reply(text):
             return False
-        if reflect and not _prompt_reflect_has_substance(text):
-            return False
+        if reflect:
+            return _prompt_reflect_has_substance(text) and not _contains_unspoken_meta(text)
         return _looks_like_spoken_answer(text, question)
 
     def synthesize_prompt_reply(
@@ -2112,34 +2200,33 @@ class OllamaChat:
             memory_block=inject_memory,
             history=self._history_for_answer(question),
         )
-        strict = (
-            " Reply only as BOB speaking to the user right now. Use I and you — never they, their, or the user. "
-            "No planning, reasoning, or background narration."
-        )
-        messages[0] = {"role": "system", "content": messages[0]["content"] + strict}
-        messages[-1] = {
-            "role": "user",
-            "content": f"{question}\n\nReply aloud in one or two short sentences.",
+        messages[0] = {
+            "role": "system",
+            "content": (
+                messages[0]["content"]
+                + " Reply now as BOB in one or two short spoken sentences. "
+                "Never mention AI, instructions, personas, or rules."
+            ),
         }
         raw = ""
-        for num_predict in (256, 384):
+        for attempt, num_predict in enumerate((256, 384)):
             try:
                 content, _thinking, _meta = self._post_chat(
                     messages,
                     num_predict=num_predict,
-                    temperature=0.2,
+                    temperature=0.15 if attempt else 0.2,
                     think=False,
                 )
             except Exception as exc:
                 log.warning("Spoken answer failed: %s", exc)
-                return "Sorry, I got stuck for a moment."
+                break
             raw = _strip_control_tokens(_strip_think_blocks(content or "")).strip()
-            thinking_raw = _strip_control_tokens(_strip_think_blocks(_thinking or "")).strip()
-            if not raw and thinking_raw:
-                raw = thinking_raw
             for candidate in _spoken_answer_candidates(raw, question):
                 if _looks_like_spoken_answer(candidate, question):
                     return _ensure_spoken_punctuation(candidate)
+        fallback = _fallback_spoken_reply(question)
+        if fallback:
+            return fallback
         return "Sorry, I didn't get that."
 
     def _recover_reply(
@@ -2154,6 +2241,9 @@ class OllamaChat:
         direct = _try_direct_answer(question)
         if direct:
             return direct
+        fallback = _fallback_spoken_reply(question)
+        if fallback:
+            return fallback
         if needs_calendar_context(question) and on_tool:
             try:
                 stamp = on_tool("get_current_time", {})
@@ -2331,6 +2421,8 @@ class OllamaChat:
                         spoken.append(leftover)
                     streamed = True
                     yield leftover
+        if cancelled and leftover.strip() and not str(content or "").strip():
+            return leftover.strip(), calls
         return content, calls
 
     def _compact_history_tools(self) -> None:

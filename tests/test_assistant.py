@@ -309,6 +309,40 @@ def test_assistant_apply_setting_live_fields(ui, tmp_path, monkeypatch):
         assistant._restart_hotkey.assert_called()
 
 
+def test_assistant_apply_settings_dict_persists_llm_and_hotkey(ui, tmp_path, monkeypatch):
+    assistant, *_ = _make_assistant(tmp_path, monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    assistant.settings.save(config_path)
+    monkeypatch.setattr("bob.settings.CONFIG_PATH", config_path)
+    assistant.overlay = ui
+    assistant.hud = None
+    assistant.toast = None
+    assistant.tray = MagicMock()
+    assistant._ui = lambda fn: fn()
+    assistant._restart_hotkey = MagicMock()
+    assistant._configure_streaming = MagicMock()
+    assistant.set_overlay_visible = MagicMock()
+    assistant.set_start_with_windows = MagicMock()
+    assistant.apply_theme = MagicMock()
+    assistant._set_llm_model = MagicMock()
+
+    assistant.apply_settings_dict(
+        {
+            "hotkey": "alt+f9",
+            "llm_model": "llama3.1",
+            "auto_endpoint": True,
+            "endpoint_silence_ms": 700,
+        }
+    )
+
+    from bob.settings import load_settings
+
+    loaded = load_settings(config_path)
+    assert loaded.hotkey == "alt+f9"
+    assert loaded.llm_model == "llama3.1"
+    assistant._set_llm_model.assert_called_once_with("llama3.1")
+
+
 def test_assistant_apply_settings_dict_theme(ui, tmp_path, monkeypatch):
     assistant, *_ = _make_assistant(tmp_path, monkeypatch)
     assistant.overlay = ui

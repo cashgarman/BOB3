@@ -31,6 +31,18 @@ def test_settings_save_and_load_roundtrip(tmp_path: Path):
     assert loaded.auto_endpoint is True
 
 
+def test_settings_save_uses_runtime_config_path(tmp_path: Path, monkeypatch):
+    path = tmp_path / "config.yaml"
+    other = tmp_path / "other.yaml"
+    s = Settings()
+    s.save(path)
+    monkeypatch.setattr("bob.settings.CONFIG_PATH", other)
+    s.update(hotkey="alt+f1")
+    assert other.exists()
+    assert "alt+f1" in other.read_text(encoding="utf-8")
+    assert "alt+f1" not in path.read_text(encoding="utf-8")
+
+
 def test_settings_update_persists(tmp_path: Path):
     path = tmp_path / "config.yaml"
     s = Settings()

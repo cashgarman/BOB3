@@ -601,7 +601,6 @@ class Assistant:
             new_model = str(values["llm_model"] or "").strip()
             if new_model and new_model != self.settings.llm_model:
                 pending_llm_model = new_model
-                values = {k: v for k, v in values.items() if k != "llm_model"}
         restart = any(str(getattr(self.settings, k, None)) != str(v) for k, v in values.items() if k in RESTART_FIELDS)
         devices_changed = any(
             str(getattr(self.settings, k, "") or "") != str(values.get(k, "") or "")
@@ -754,7 +753,7 @@ class Assistant:
                 list_devices("input"),
                 list_devices("output"),
                 on_recording=self._set_hotkey_recording,
-                on_hotkey_changed=lambda spec: self.apply_setting("hotkey", spec),
+                on_hotkey_changed=self._preview_hotkey,
                 on_preview_voice=self._preview_tts_voice,
                 on_open_theme=self.open_theme,
                 on_close=lambda: setattr(self, "_settings_win", None),
@@ -885,6 +884,15 @@ class Assistant:
             )
 
         self._ui(show)
+
+    def _preview_hotkey(self, spec: str) -> None:
+        name = str(spec or "").strip().lower()
+        if not name:
+            return
+        self.settings.hotkey = name
+        self._restart_hotkey()
+        if self.hud:
+            self.hud.set_hotkey(name)
 
     def _set_hotkey_recording(self, active: bool) -> None:
         if active:

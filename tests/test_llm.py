@@ -354,10 +354,10 @@ def test_try_direct_answer_math():
     assert _try_direct_answer("What is 2 plus 2?") == "4"
 
 
-def test_try_direct_answer_feeling():
+def test_try_direct_answer_feeling_uses_llm():
     from bob.llm import _try_direct_answer
 
-    assert _try_direct_answer("How are you feeling?") == "I'm doing well and ready to help."
+    assert _try_direct_answer("How are you feeling?") == ""
 
 
 def test_try_direct_answer_location():
@@ -418,7 +418,7 @@ def test_sanitize_spoken_reply_extracts_declared_answer():
     )
 
 
-def test_generate_spoken_answer_uses_thinking_when_content_empty():
+def test_generate_spoken_answer_ignores_thinking_when_content_empty():
     chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
 
     class FakeClient:
@@ -444,8 +444,7 @@ def test_generate_spoken_answer_uses_thinking_when_content_empty():
 
     with patch("bob.llm.httpx.Client", return_value=FakeClient()):
         reply = chat._generate_spoken_answer("What is your favorite color and why?")
-    assert reply.startswith("I don't have a favorite color")
-    assert "explore colors" in reply
+    assert reply == "Sorry, I didn't get that."
 
 
 def test_coalesce_spoken_reply_keeps_full_answer_not_but_fragment():
@@ -495,6 +494,46 @@ def test_first_person_answer_passes_gate():
         "I'll go with blue because it's calming.",
         "What is your favorite color and why?",
     )
+
+
+def test_looks_like_spoken_answer_rejects_user_echo_and_instruction_leak():
+    from bob.llm import _looks_like_spoken_answer, _sanitize_spoken_reply
+
+    question = "I'm really tired. I've been working on your code all night."
+    bad = (
+        "We are in the middle of a conversation. "
+        "I've been working on your code all night. "
+        '" As BOB, I must reply in one or two short sentences.'
+    )
+    assert not _looks_like_spoken_answer(bad, question)
+    assert not _sanitize_spoken_reply(bad, None, question)
+    assert _looks_like_spoken_answer(
+        "That sounds exhausting — thank you for pushing through on my code.",
+        question,
+    )
+
+
+def test_looks_like_spoken_answer_rejects_persona_and_instruction_monologue():
+    from bob.llm import _looks_like_spoken_answer, _fallback_spoken_reply
+
+    cases = [
+        (
+            "How are you feeling?",
+            "Since I am an AI, but in this role I am BOB (a character), I should be consistent with the persona.",
+        ),
+        (
+            "What does that mean?",
+            '" and I (as BOB) responded with a statement about being an AI. ". - Use "I" and "you" only.',
+        ),
+        (
+            "I've been programming you all night and you're still responding with really bad responses.",
+            '" But the instruction says: "Give the fact first, then one extra detail.',
+        ),
+    ]
+    for question, bad in cases:
+        assert not _looks_like_spoken_answer(bad, question)
+    assert _fallback_spoken_reply("How are you feeling?") == "I'm doing well, thanks for asking."
+    assert _fallback_spoken_reply("What does that mean?").startswith("I meant I'm here")
 
 
 def test_chitchat_memory_block_skipped_without_chat_context():
@@ -985,9 +1024,8 @@ def test_chat_general_question_skips_tool_rounds():
     assert calls["post"] == 1
     payload = calls["payload"]
     assert payload["think"] is False
-    assert payload["messages"][-1]["content"].startswith("What's the biggest country in the world?")
-    assert "Reply aloud" in payload["messages"][-1]["content"]
-    assert "never they, their, or the user" in payload["messages"][0]["content"].lower()
+    assert payload["messages"][-1]["content"] == "What's the biggest country in the world?"
+    assert "never mention ai" in payload["messages"][0]["content"].lower()
     assert payload["options"]["num_predict"] == 256
 
 
@@ -1142,8 +1180,8 @@ def test_chat_recovers_from_echo():
 
     with patch("bob.llm.httpx.Client", return_value=FakeClient()):
         chunks = list(chat.chat("How are you feeling?", tools=None, on_tool=None))
-    assert chunks == ["I'm doing well and ready to help."]
-    assert chat.history[-1]["content"] == "I'm doing well and ready to help."
+    assert chunks == ["I'm doing well, thanks for asking."]
+    assert chat.history[-1]["content"] == "I'm doing well, thanks for asking."
 
 
 def test_round_holds_streamed_think_tags():

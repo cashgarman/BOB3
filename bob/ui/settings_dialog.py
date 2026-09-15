@@ -71,6 +71,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self._combos: dict[str, ctk.CTkComboBox] = {}
         self._recorder: HotkeyRecorder | None = None
         self._recording = False
+        self._opening_hotkey = str(settings.hotkey or "")
+        self._saved = False
         self.protocol("WM_DELETE_WINDOW", self._close)
 
         frame = ctk.CTkScrollableFrame(self, **theme.scroll_frame())
@@ -164,12 +166,13 @@ class SettingsDialog(ctk.CTkToplevel):
         var = self.vars.get("llm_model")
         if combo is None or not isinstance(var, ctk.StringVar):
             return
-        current = str(self.settings.llm_model or "")
+        current = str(var.get() or self.settings.llm_model or "")
         values = list(models or [])
         if current and current not in values:
             values = [current, *values]
         combo.configure(values=values or [current or ""])
-        var.set(current)
+        if current:
+            var.set(current)
 
     def _open_theme(self) -> None:
         if self.on_open_theme:
@@ -180,13 +183,15 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(parent, text="Theme preset", anchor="w", **theme.label_style()).pack(fill="x", pady=(8, 2))
         var = ctk.StringVar(value=preset(self.settings.theme).title)
         self.vars["theme"] = var
-        ctk.CTkComboBox(
+        theme_combo = ctk.CTkComboBox(
             parent,
             values=labels_for(PRESET_KEYS),
             variable=var,
             state="readonly",
             **theme.combo(),
-        ).pack(fill="x")
+        )
+        theme_combo.pack(fill="x")
+        self._combos["theme"] = theme_combo
 
     def _section(self, parent, title: str) -> None:
         theme = theming.current()
@@ -210,7 +215,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._hotkey_hint = set_role(
             ctk.CTkLabel(
                 parent,
-                text="Click, then press a key combination. It saves immediately.",
+                text="Click, then press a key combination. Saved when you press Save.",
                 anchor="w",
                 font=theme.font(12),
                 **theme.label_style(muted=True),
@@ -243,12 +248,17 @@ class SettingsDialog(ctk.CTkToplevel):
                 self.on_hotkey_changed(spec)
         if self._hotkey_btn.winfo_exists():
             self._hotkey_btn.configure(text=str(self.vars["hotkey"].get()).upper())
-            self._hotkey_hint.configure(text="Click, then press a key combination. It saves immediately.")
+            self._hotkey_hint.configure(text="Click, then press a key combination. Saved when you press Save.")
         if self.on_recording:
             self.on_recording(False)
 
     def _close(self) -> None:
         self._finish_hotkey_capture(None)
+        if not self._saved and self.on_hotkey_changed:
+            chosen = str(self.vars["hotkey"].get() or "").strip().lower()
+            if chosen != self._opening_hotkey:
+                self.vars["hotkey"].set(self._opening_hotkey)
+                self.on_hotkey_changed(self._opening_hotkey)
         if self.on_close:
             self.on_close()
         self.destroy()
@@ -289,9 +299,9 @@ class SettingsDialog(ctk.CTkToplevel):
             values = [current, *values]
         var = ctk.StringVar(value=current)
         self.vars["tts_voice"] = var
-        ctk.CTkComboBox(row, values=values, variable=var, state="readonly", **theme.combo()).pack(
-            side="left", fill="x", expand=True
-        )
+        voice_combo = ctk.CTkComboBox(row, values=values, variable=var, state="readonly", **theme.combo())
+        voice_combo.pack(side="left", fill="x", expand=True)
+        self._combos["tts_voice"] = voice_combo
         set_role(
             ctk.CTkButton(
                 row,
@@ -336,7 +346,20 @@ class SettingsDialog(ctk.CTkToplevel):
         self.vars[key] = var
         ctk.CTkCheckBox(parent, text=label, variable=var, **theme.check()).pack(anchor="w", pady=6)
 
+    def _sync_widget_values(self) -> None:
+        for key, combo in self._combos.items():
+            var = self.vars.get(key)
+            if not isinstance(var, ctk.StringVar):
+                continue
+            try:
+                value = str(combo.get()).strip()
+            except Exception:
+                continue
+            if value:
+                var.set(value)
+
     def _save(self) -> None:
+        self._sync_widget_values()
         raw = {key: var.get() for key, var in self.vars.items()}
         raw["system_prompt"] = self.prompt.get("1.0", "end").strip()
         raw_roots = self.file_roots.get("1.0", "end").strip()
@@ -385,6 +408,7 @@ class SettingsDialog(ctk.CTkToplevel):
             self.error.configure(text="\n".join(problems[:4]))
             return
         self._finish_hotkey_capture(None)
+        self._saved = True
         self.on_save(typed)
         if self.on_close:
             self.on_close()
