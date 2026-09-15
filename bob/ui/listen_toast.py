@@ -12,6 +12,7 @@ from bob.audio import WAVE_BARS
 from bob.state import State
 from bob.ui import theme as theming
 from bob.ui.theme import Theme, set_role
+from bob.ui.stats_line import format_usage_stats
 from bob.ui.transcript import paint_transcript
 
 TOAST_W = 400
@@ -122,7 +123,12 @@ class ListenToast(ctk.CTkToplevel):
         self._pending_reply = ""
         self._pending_thought = ""
         self._detail = ""
-        self._stat_values: dict[str, float | None] = {"gpu": None, "vram": None, "cpu": None}
+        self._stat_values: dict[str, float | None] = {
+            "gpu": None,
+            "vram": None,
+            "cpu": None,
+            "context": None,
+        }
         self.overrideredirect(True)
         self.resizable(False, False)
         set_role(self, "skip")
@@ -213,17 +219,15 @@ class ListenToast(ctk.CTkToplevel):
         self.after(20, self._init_native)
 
     def _sync_meta(self) -> None:
-        parts: list[str] = []
-        if self._detail:
-            parts.append(self._detail)
-        stats: list[str] = []
-        for key, label in (("gpu", "GPU"), ("vram", "VRAM"), ("cpu", "CPU")):
-            value = self._stat_values.get(key)
-            if value is not None:
-                stats.append(f"{label} {int(round(float(value) * 100))}%")
-        if stats:
-            parts.append(" · ".join(stats))
-        self.meta.configure(text=" · ".join(parts))
+        self.meta.configure(
+            text=format_usage_stats(
+                detail=self._detail,
+                gpu=self._stat_values.get("gpu"),
+                vram=self._stat_values.get("vram"),
+                cpu=self._stat_values.get("cpu"),
+                context=self._stat_values.get("context"),
+            )
+        )
 
     def apply_theme(self, theme: Theme) -> None:
         theming.restyle(self, theme)  # the toplevel itself is role "skip": it is a card, not a window
@@ -290,11 +294,17 @@ class ListenToast(ctk.CTkToplevel):
         gpu: float | None = None,
         vram: float | None = None,
         cpu: float | None = None,
+        context: float | None = None,
     ) -> None:
         if not self._open:
             return
         changed = False
-        for key, value in (("gpu", gpu), ("vram", vram), ("cpu", cpu)):
+        for key, value in (
+            ("gpu", gpu),
+            ("vram", vram),
+            ("cpu", cpu),
+            ("context", context),
+        ):
             if self._stat_values.get(key) != value:
                 self._stat_values[key] = value
                 changed = True

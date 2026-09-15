@@ -11,6 +11,7 @@ from bob.chat_store import ChatStore
 from bob.hotkeys import GlobalHotkey
 from bob.llm import OllamaChat
 from bob.memory.service import MemoryService
+from bob.memory.session_rag import SessionMemory
 from bob.prompts import save_system_prompt
 from bob.settings import DATA_DIR, MODELS_DIR, Settings, load_settings
 from bob.state import State
@@ -102,6 +103,7 @@ class Assistant:
         self._theme_win = None
         self._ready_toast_sent = False
         self.memory = MemoryService(DATA_DIR / "memory")
+        self.session_memory = SessionMemory(DATA_DIR / "memory" / "session", self.memory.embedder)
         self.tools = ToolRegistry(DATA_DIR, settings=self.settings, memory=self.memory)
         self.chat = ChatStore(DATA_DIR / "chat.db")
         self._session_id = self.chat.current_session()
@@ -149,6 +151,8 @@ class Assistant:
             self.settings.system_prompt,
             self.settings.max_history_turns,
         )
+        self.llm.compress_threshold = float(self.settings.context_compress_threshold)
+        self.llm.on_index_overflow = self._index_session_overflow
         self._restore_llm_history()
         self.wake = WakeWordDetector(
             self.settings.wake_word,
@@ -245,6 +249,7 @@ class Assistant:
             status("Memory")
             try:
                 self.memory.load()
+                self.session_memory.load()
             except Exception as exc:
                 log.exception("Memory failed to load")
                 self._surface_note(f"Memory offline: {exc}")
@@ -420,6 +425,7 @@ class Assistant:
         if "system_prompt" in values:
             save_system_prompt(self.settings.system_prompt)
         self.llm.max_turns = self.settings.max_history_turns
+        self.llm.compress_threshold = float(self.settings.context_compress_threshold)
         self.tts.voice = self.settings.tts_voice
         from bob.tts import clamp_speed
 
@@ -1191,12 +1197,7 @@ class Assistant:
             self._commit_turn("user", user_text)
             self._set_state(State.THINKING, "ollama")
             self._talk_set_thought("")
-            memory_block = ""
-            try:
-                memory_block = self.memory.retrieve(user_text, limit=int(self.settings.memory_max_inject))
-            except Exception:
-                memory_block = ""
-            memory_block = self._prefetch_tool_context(user_text, memory_block)
+            memory_block = self._build_memory_block(user_text)
             pending = ""
             full = ""
             for chunk in self.llm.chat(
@@ -1279,6 +1280,13 @@ class Assistant:
                     name="memory-ingest",
                     daemon=True,
                 ).start()
+            if assistant_text and user_text and self.settings.session_rag_enabled:
+                threading.Thread(
+                    target=self._index_session_turn,
+                    args=(user_text, assistant_text),
+                    name="session-rag-index",
+                    daemon=True,
+                ).start()
 
     def _prefetch_tool_context(self, user_text: str, memory_block: str) -> str:
         from bob.llm import (
@@ -1342,6 +1350,53 @@ class Assistant:
         except Exception:
             log.exception("Memory ingest failed")
 
+    def _build_memory_block(self, user_text: str) -> str:
+        memory_block = ""
+        try:
+            memory_block = self.memory.retrieve(user_text, limit=int(self.settings.memory_max_inject))
+        except Exception:
+            memory_block = ""
+        if self.settings.session_rag_enabled and self.session_memory.ready:
+            try:
+                session_block = self.session_memory.retrieve(
+                    self._session_id,
+                    user_text,
+                    limit=int(self.settings.session_rag_max_inject),
+                )
+            except Exception:
+                session_block = ""
+            else:
+                if session_block:
+                    if memory_block.strip():
+                        memory_block = f"{session_block}\n\n{memory_block.strip()}"
+                    else:
+                        memory_block = session_block
+        return self._prefetch_tool_context(user_text, memory_block)
+
+    def _index_session_overflow(self, messages: list[dict]) -> None:
+        if not self.settings.session_rag_enabled or not self.session_memory.ready:
+            return
+        try:
+            self.session_memory.index_messages(self._session_id, messages)
+        except Exception:
+            log.debug("Session overflow indexing failed", exc_info=True)
+
+    def _index_session_turn(self, user_text: str, assistant_text: str) -> None:
+        if not self.settings.session_rag_enabled or not self.session_memory.ready:
+            return
+        try:
+            self.session_memory.index_turn(self._session_id, user_text, assistant_text)
+        except Exception:
+            log.debug("Session turn indexing failed", exc_info=True)
+
+    def _refresh_usage_stats(self) -> None:
+        stats = sample_usage()
+        context = self.llm.context_usage()
+        if self.toast and self.toast.is_open():
+            self.toast.set_stats(stats.gpu, stats.vram, stats.cpu, context)
+        if self._overlay_should_update() and self.overlay:
+            self.overlay.set_stats(stats.gpu, stats.vram, stats.cpu, context)
+
     def _poll_level(self) -> None:
         if self.overlay is None:
             return
@@ -1352,14 +1407,13 @@ class Assistant:
             self.hud.set_level(boost)
         if self.toast and self.toast.is_open():
             self.toast.set_waveform(self.audio.waveform_bars())
-            active = self.state in {State.LISTENING, State.THINKING, State.SPEAKING}
-            if active:
-                now = time.monotonic()
-                last = getattr(self, "_stats_ui_at", 0.0)
-                if now - last >= 2.0:
-                    self._stats_ui_at = now
-                    stats = sample_usage()
-                    self.toast.set_stats(stats.gpu, stats.vram, stats.cpu)
+        show_stats = (self.toast and self.toast.is_open()) or self._overlay_should_update()
+        if show_stats:
+            now = time.monotonic()
+            last = getattr(self, "_stats_ui_at", 0.0)
+            if now - last >= 1.0:
+                self._stats_ui_at = now
+                self._refresh_usage_stats()
         if self.root is None:
             return
         if not self._stop.is_set():

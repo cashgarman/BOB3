@@ -8,6 +8,7 @@ import customtkinter as ctk
 from bob.state import State
 from bob.ui import theme as theming
 from bob.ui.theme import Theme, set_role
+from bob.ui.stats_line import format_usage_stats
 from bob.ui.transcript import paint_transcript
 from bob.win32_app import hide_from_taskbar, show_in_taskbar
 
@@ -39,6 +40,13 @@ class Overlay(ctk.CTkToplevel):
         self._pending_reply = ""
         self._pending_thought = ""
         self._state = State.LOADING
+        self._detail = ""
+        self._stat_values: dict[str, float | None] = {
+            "gpu": None,
+            "vram": None,
+            "cpu": None,
+            "context": None,
+        }
         self.title("BOB")
         from bob.win32_app import apply_tk_icon
 
@@ -119,6 +127,18 @@ class Overlay(ctk.CTkToplevel):
         )
         self.send_btn.pack(side="right", padx=(8, 0))
 
+        self.stats = set_role(
+            ctk.CTkLabel(
+                self,
+                text="",
+                font=theme.font(11),
+                text_color=theme.text_muted,
+                anchor="w",
+            ),
+            "muted",
+        )
+        self.stats.pack(fill="x", padx=16, pady=(0, 10))
+
         if visible:
             show_in_taskbar(self)
         else:
@@ -162,12 +182,44 @@ class Overlay(ctk.CTkToplevel):
         self._paint()
 
     def set_state(self, state: State, detail: str = "") -> None:
-        del detail
         self._state = state
+        self._detail = detail or ""
         label = state.value.upper()
         color = theming.current().state_color(state)
         self.status.configure(text=label, text_color=color)
         self.level.configure(progress_color=color)
+        self._sync_stats()
+
+    def set_stats(
+        self,
+        gpu: float | None = None,
+        vram: float | None = None,
+        cpu: float | None = None,
+        context: float | None = None,
+    ) -> None:
+        changed = False
+        for key, value in (
+            ("gpu", gpu),
+            ("vram", vram),
+            ("cpu", cpu),
+            ("context", context),
+        ):
+            if self._stat_values.get(key) != value:
+                self._stat_values[key] = value
+                changed = True
+        if changed:
+            self._sync_stats()
+
+    def _sync_stats(self) -> None:
+        self.stats.configure(
+            text=format_usage_stats(
+                detail=self._detail,
+                gpu=self._stat_values.get("gpu"),
+                vram=self._stat_values.get("vram"),
+                cpu=self._stat_values.get("cpu"),
+                context=self._stat_values.get("context"),
+            )
+        )
 
     def set_level(self, value: float) -> None:
         self.level.set(max(0.0, min(1.0, value)))

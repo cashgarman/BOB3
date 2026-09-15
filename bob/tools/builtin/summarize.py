@@ -11,8 +11,8 @@ HTTP_TIMEOUT = httpx.Timeout(60.0)
 MAX_SOURCE_CHARS = 6000
 # Give the model enough room to finish a multi-item list without truncation,
 # but not so much that a runaway monologue burns the whole budget.
-SUMMARIZE_NUM_PREDICT = 480
-SUMMARIZE_REPAIR_NUM_PREDICT = 320
+SUMMARIZE_NUM_PREDICT = 2048
+SUMMARIZE_REPAIR_NUM_PREDICT = 1536
 
 _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re.DOTALL)
 _MONOLOGUE_START_RE = re.compile(
@@ -23,7 +23,14 @@ _MONOLOGUE_START_RE = re.compile(
 _MONOLOGUE_MARKERS_RE = re.compile(
     r"\b(the user asked|i need to|the instructions say|no planning|no preamble|"
     r"looking at the source|source material provided|reply with only|"
-    r"i(?:['\u2019]ll| will) (?:turn|summarize)|let me)\b",
+    r"i(?:['\u2019]ll| will) (?:turn|summarize)|let me|speak aloud|what to speak|"
+    r"two sentences|no extra words|let me make sure|avoid mentioning|exactly what|"
+    r"source material|output only|these instructions)\b",
+    re.IGNORECASE,
+)
+_STRONG_MONOLOGUE_RE = re.compile(
+    r"\b(speak aloud|what to speak|source material|no extra words|let me make sure|"
+    r"avoid mentioning|output only|these instructions|two sentences)\b",
     re.IGNORECASE,
 )
 
@@ -37,6 +44,8 @@ def _looks_like_monologue(text: str) -> bool:
     if not t:
         return True
     if _MONOLOGUE_START_RE.search(t):
+        return True
+    if _STRONG_MONOLOGUE_RE.search(t):
         return True
     hits = len(_MONOLOGUE_MARKERS_RE.findall(t))
     return hits >= 2
@@ -115,7 +124,7 @@ def summarize_text(
     user = f"Question: {(question or 'Summarize this.').strip()}\n\nSource material:\n{source[:MAX_SOURCE_CHARS]}"
 
     content = _post_ollama(host, model, system, user, SUMMARIZE_NUM_PREDICT)
-    if content and not _looks_like_monologue(content):
+    if content and not _looks_like_monologue(content) and content.rstrip()[-1:] in ".!?-\n":
         return content
 
     tail = _extract_answer_after_monologue(content)
@@ -130,7 +139,7 @@ def summarize_text(
     )
     repair_user = user
     content = _post_ollama(host, model, repair_system, repair_user, SUMMARIZE_REPAIR_NUM_PREDICT)
-    if content and not _looks_like_monologue(content):
+    if content and not _looks_like_monologue(content) and content.rstrip()[-1:] in ".!?-\n":
         return content
     tail = _extract_answer_after_monologue(content)
     if tail and not _looks_like_monologue(tail):

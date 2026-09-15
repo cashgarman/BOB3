@@ -134,3 +134,15 @@ def test_overlay_settings_button(ui):
     ui.on_settings = lambda: opened.append(True)
     find_widget(ui, ctk.CTkButton, text="⚙").invoke()
     assert opened == [True]
+
+
+def test_overlay_set_stats(ui):
+    ui.set_state(State.THINKING, "ollama")
+    ui.set_stats(gpu=0.25, vram=0.5, cpu=0.12, context=0.41)
+    pump(ui)
+    text = ui.stats.cget("text")
+    assert "ollama" in text
+    assert "GPU 25%" in text
+    assert "VRAM 50%" in text
+    assert "CPU 12%" in text
+    assert "CONTEXT 41%" in text

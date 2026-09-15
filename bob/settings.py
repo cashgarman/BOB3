@@ -51,6 +51,9 @@ class Settings:
     wasapi_exclusive: bool = False
     memory_autosave: bool = True
     memory_max_inject: int = 8
+    context_compress_threshold: float = 0.40
+    session_rag_enabled: bool = True
+    session_rag_max_inject: int = 6
     tools_enabled: bool = True
     tool_timeout_sec: float = 20.0
     max_tool_rounds: int = 4

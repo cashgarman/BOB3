@@ -29,13 +29,16 @@ system_prompt: "You are BOB, a local voice assistant. Speak in two or three natu
   \ detail. No markdown, bullet lists, or code fences unless the user asks. Background\
   \ notes and memory are for your use only \u2014 never repeat, summarize, or mention\
   \ them unless the user explicitly asks."
-show_overlay: false
-start_with_windows: false
+show_overlay: true
+start_with_windows: true
 input_device: ''
 output_device: ''
 wasapi_exclusive: false
 memory_autosave: true
 memory_max_inject: 8
+context_compress_threshold: 0.4
+session_rag_enabled: true
+session_rag_max_inject: 6
 tools_enabled: true
 tool_timeout_sec: 20.0
 max_tool_rounds: 4

@@ -134,10 +134,11 @@ def test_toast_set_stats_updates_meters(ui):
     toast.present()
     pump(ui)
     toast.set_state(State.THINKING, "ollama")
-    toast.set_stats(gpu=0.42, vram=0.67, cpu=0.15)
+    toast.set_stats(gpu=0.42, vram=0.67, cpu=0.15, context=0.33)
     pump(ui)
     text = toast.meta.cget("text")
     assert "GPU 42%" in text
     assert "VRAM 67%" in text
     assert "CPU 15%" in text
+    assert "CONTEXT 33%" in text
     toast.destroy()

@@ -31,6 +31,11 @@ _FALLBACK_TOOL_GUIDANCE = (
     "Do not tell the user you are checking or looking something up — call the tool silently, "
     "then answer in one breath."
 )
+_FALLBACK_TOOL_SYNTHESIS = (
+    "You are BOB, a local voice assistant. The user asked a question and tools have already "
+    "been run. Use the user's question, conversation history, background notes, and tool "
+    "results to produce one short spoken answer. Output ONLY the exact words to speak aloud."
+)
 
 
 def _read(name: str, fallback: str) -> str:
@@ -55,6 +60,10 @@ def load_answer_prompt() -> str:
 
 def load_tool_guidance() -> str:
     return _read("tool_guidance.txt", _FALLBACK_TOOL_GUIDANCE)
+
+
+def load_tool_synthesis_prompt() -> str:
+    return _read("tool_synthesis.txt", _FALLBACK_TOOL_SYNTHESIS)
 
 
 def save_system_prompt(text: str) -> None:

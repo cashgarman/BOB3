@@ -370,6 +370,66 @@ def test_needs_agentic_tools():
     )
 
 
+def test_context_usage():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    assert chat.context_usage() is None
+    chat.last_prompt_eval_count = 1024
+    assert chat.context_usage() == 0.25
+    chat.last_prompt_eval_count = 5000
+    assert chat.context_usage() == 1.0
+
+
+def test_post_chat_records_prompt_eval_count():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "message": {"content": "Hello."},
+                "prompt_eval_count": 512,
+                "prompt_eval_duration": 1_000_000,
+            }
+
+    class FakeClient:
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    with patch("bob.llm.httpx.Client", return_value=FakeClient()):
+        content, _thinking, _meta = chat._post_chat([{"role": "user", "content": "hi"}])
+    assert content == "Hello."
+    assert chat.context_usage() == 0.125
+
+
+def test_manage_context_compacts_overflow():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    chat.compress_threshold = 0.1
+    chat.last_prompt_eval_count = 2048
+    indexed: list[list[dict]] = []
+    chat.on_index_overflow = indexed.append
+    chat.history = [
+        {"role": "user", "content": "old question"},
+        {"role": "assistant", "content": "old answer"},
+        {"role": "user", "content": "new question"},
+        {"role": "tool", "tool_name": "web_search", "content": "1. Headline — " + ("body " * 200)},
+        {"role": "assistant", "content": "recent answer"},
+        {"role": "user", "content": "latest question"},
+    ]
+    with patch("bob.context.compress_session_transcript", return_value="Earlier: old question and answer"):
+        chat._manage_context()
+    assert len(chat.history) < 6
+    assert chat.session_summary == "Earlier: old question and answer"
+    assert indexed
+
+
 def test_web_search_helpers():
     from bob.llm import (
         _deferral_tool_args,
@@ -387,7 +447,7 @@ def test_web_search_helpers():
     assert _fresh_web_search(question)
     assert _web_search_query(question) == "the top headlines in BBC News at news.bbc.co.uk"
     assert _deferral_tool_name("Okay, the user is asking me to look up headlines.", question) == "web_search"
-    assert _deferral_tool_args("web_search", question)["query"] == "the top headlines in BBC News at news.bbc.co.uk"
+    assert _deferral_tool_args("web_search", question)["query"] == "BBC News top headlines site:bbc.co.uk/news"
 
     followup = "Can you rephrase that as bullet points?"
     assert needs_chat_context(followup)
@@ -398,6 +458,55 @@ def test_web_search_helpers():
     headlines = "summarize the BBC headlines as bullet points."
     assert needs_agentic_tools(headlines)
     assert not _fresh_web_search(headlines)
+
+    complaint = "That doesn't include the top headlines"
+    assert needs_chat_context(complaint)
+    assert not _fresh_web_search(complaint)
+
+
+def test_web_search_followup_reuses_prior_request():
+    from bob.llm import (
+        OllamaChat,
+        _is_web_search_followup,
+        _refine_web_search_query,
+        _web_search_followup_query,
+    )
+
+    history = [
+        {"role": "user", "content": "Search online for the top BBC News articles."},
+        {"role": "tool", "tool_name": "web_search", "content": "1. BBC Home — nav page"},
+        {"role": "assistant", "content": "Here's what I found: BBC Home."},
+        {"role": "user", "content": "That doesn't include the top headlines"},
+    ]
+    followup = history[-1]["content"]
+    assert _is_web_search_followup(followup, history)
+    assert _web_search_followup_query(history, followup) == "BBC News top headlines site:bbc.co.uk/news"
+    assert _refine_web_search_query("the top BBC News articles", followup) == (
+        "BBC News top headlines site:bbc.co.uk/news"
+    )
+
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    chat.history = history[:-1]
+    calls: list[tuple[str, dict]] = []
+
+    def on_tool(name, arguments):
+        calls.append((name, arguments))
+        if name == "web_search":
+            return (
+                "1. Pakistan PM motorcade attacked — details (https://bbc.co.uk/a)\n"
+                "2. Ukraine snap election warning — details (https://bbc.co.uk/b)"
+            )
+        raise AssertionError(name)
+
+    with patch.object(chat, "_synthesize_from_tools", return_value=""):
+        reply = chat._answer_from_web_search(
+            followup,
+            on_tool,
+            query=_web_search_followup_query(history, followup),
+            thought="Retried the web search using your earlier request.",
+        )
+    assert calls[0][1]["query"] == "BBC News top headlines site:bbc.co.uk/news"
+    assert "Pakistan PM motorcade attacked" in reply
 
 
 def test_answer_messages_include_memory_block():
@@ -693,16 +802,17 @@ def test_chat_force_final_for_agentic_question():
         return ""
 
     with patch("bob.llm.httpx.Client", return_value=FakeClient()):
-        chunks = list(
-            chat.chat(
-                "Search the web for the biggest country",
-                tools=tools,
-                on_tool=on_tool,
-                max_rounds=4,
+        with patch.object(OllamaChat, "_synthesize_from_tools", return_value=""):
+            chunks = list(
+                chat.chat(
+                    "Search the web for the biggest country",
+                    tools=tools,
+                    on_tool=on_tool,
+                    max_rounds=4,
+                )
             )
-        )
-    assert [name for name, _ in calls] == ["web_search", "summarize_for_speech"]
-    assert chunks == ["Russia is the largest country by area."]
+    assert [name for name, _ in calls] == ["web_search"]
+    assert chunks == ["Here's what I found: BBC headline example."]
 
 
 def test_chat_recovers_from_monologue_tool_round():
