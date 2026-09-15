@@ -15,7 +15,7 @@ def test_compose_internal_thought_includes_filtered_monologue():
         'Bob should say "It\'s 1:03 PM, Cash."'
     )
     thought = _compose_internal_thought("", raw, "It's 1:03 PM, Cash.", "What time is it?")
-    assert "Okay, the user is asking" in thought
+    assert thought == "Planned the reply internally."
 
 
 def test_paint_transcript_shows_internal_thought(ui):

@@ -6,6 +6,8 @@ import sys
 import threading
 import time
 
+from bob.agents.graph import stream_turn
+from bob.agents.state import TurnRuntime
 from bob.audio import AudioHub, list_devices
 from bob.chat_store import ChatStore
 from bob.hotkeys import GlobalHotkey
@@ -112,6 +114,7 @@ class Assistant:
         self._pending_reply = ""
         self._pending_thought = ""
         self._title_jobs: set[int] = set()
+        self._last_assistant_message_id: int | None = None
         self.audio = AudioHub(
             sample_rate=self.settings.sample_rate,
             input_device=self.settings.input_device or None,
@@ -1114,9 +1117,12 @@ class Assistant:
                 turn["thought"] = note
         self._turns.append(turn)
         try:
-            self.chat.add_message(self._session_id, role, text)
+            message_id = self.chat.add_message(self._session_id, role, text)
         except Exception:
             log.exception("Failed to persist chat message")
+            message_id = None
+        if role == "assistant":
+            self._last_assistant_message_id = message_id
         if role == "user":
             self._pending_user = ""
         else:
@@ -1284,17 +1290,17 @@ class Assistant:
             self._commit_turn("user", user_text)
             self._set_state(State.THINKING, "ollama")
             self._talk_set_thought("")
-            memory_block = self._build_memory_block(user_text)
             pending = ""
             full = ""
-            for chunk in self.llm.chat(
+            for chunk in stream_turn(
+                self.llm,
                 user_text,
-                memory_block=memory_block,
                 tools=self._tool_schemas(),
                 on_tool=lambda name, arguments, t=token: self._run_tool(name, arguments, cancel=t),
                 on_thought=self._talk_set_thought,
                 cancel=token,
                 max_rounds=int(self.settings.max_tool_rounds),
+                runtime=self._turn_runtime(token),
             ):
                 if token.is_set():
                     if started:
@@ -1360,6 +1366,13 @@ class Assistant:
             if not token.is_set() and self.state != State.LISTENING:
                 self._set_state(State.IDLE, self._ready_detail())
                 self._ui(self._restore_idle_ui)
+            if assistant_text and user_text:
+                threading.Thread(
+                    target=self._after_turn_lab,
+                    args=(user_text, assistant_text),
+                    name="prompt-lab",
+                    daemon=True,
+                ).start()
             if assistant_text and user_text and self.settings.memory_autosave:
                 threading.Thread(
                     target=self._ingest_memory,
@@ -1431,9 +1444,74 @@ class Assistant:
         self._set_state(State.THINKING, "ollama")
         return result
 
+    def _turn_runtime(self, cancel: threading.Event | None = None) -> TurnRuntime:
+        token = cancel or self._cancel
+        settings = self.settings
+        return TurnRuntime(
+            llm=self.llm,
+            on_tool=lambda name, arguments, t=token: self._run_tool(name, arguments, cancel=t),
+            on_thought=self._talk_set_thought,
+            cancel=token,
+            tools=self._tool_schemas(),
+            max_rounds=int(settings.max_tool_rounds),
+            memory=self.memory,
+            session_memory=self.session_memory,
+            session_id=self._session_id,
+            settings=settings,
+            registry=self.tools,
+            chat_store=self.chat,
+            tool_timeout_sec=float(settings.tool_timeout_sec),
+            memory_max_inject=int(settings.memory_max_inject),
+            session_rag_max_inject=int(settings.session_rag_max_inject),
+            session_rag_enabled=bool(settings.session_rag_enabled),
+            tools_enabled=bool(settings.tools_enabled),
+            validator_on_tools=bool(settings.validator_on_tools),
+            score_sample_rate=float(settings.score_sample_rate),
+            on_status=lambda msg: self._set_state(State.THINKING, msg),
+        )
+
+    def _after_turn_lab(self, user_text: str, assistant_text: str) -> None:
+        from bob.prompt_lab.graph import run_prompt_lab
+        from bob.prompt_lab.scorer import heuristic_scores
+        from bob.prompt_lab.versioning import current_version
+
+        scores = dict(getattr(self.llm, "last_turn_scores", None) or {})
+        if not scores:
+            scores = heuristic_scores(assistant_text, user_text)
+        scores.setdefault("prompt_version", current_version())
+        overall = scores.get("overall")
+        if overall is not None and self.settings.show_overlay and self.llm.last_internal_thought:
+            note = f"{self.llm.last_internal_thought}\n\nscore={float(overall):.2f}"
+            self._talk_set_thought(note)
+        add_score = getattr(self.chat, "add_score", None)
+        if callable(add_score):
+            try:
+                add_score(
+                    self._session_id,
+                    scores,
+                    message_id=self._last_assistant_message_id,
+                    prompt_version=int(scores.get("prompt_version") or 0),
+                )
+            except Exception:
+                log.debug("Turn score persist failed", exc_info=True)
+        if not getattr(self.settings, "prompt_lab_enabled", True):
+            return
+        try:
+            transcripts = []
+            if hasattr(self.chat, "scored_transcripts"):
+                transcripts = self.chat.scored_transcripts(limit=40)
+            if not transcripts:
+                transcripts = [(user_text, assistant_text, float(scores.get("overall") or 0))]
+            recent = self.chat.recent_scores(limit=20) if hasattr(self.chat, "recent_scores") else [scores]
+            run_prompt_lab(self.settings, self.llm.generate, transcripts, recent, data_dir=DATA_DIR)
+        except Exception:
+            log.debug("Prompt lab skipped", exc_info=True)
+
     def _ingest_memory(self, user_text: str, assistant_text: str) -> None:
         try:
-            self.memory.ingest(user_text, assistant_text, self.llm.generate)
+            from bob.agents.ingest import run_memory_ingest
+
+            run_memory_ingest(self._turn_runtime(self._cancel), user_text, assistant_text)
         except Exception:
             log.exception("Memory ingest failed")
 

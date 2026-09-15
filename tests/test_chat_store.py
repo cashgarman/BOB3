@@ -54,3 +54,22 @@ def test_chat_store_update_title_and_updated_at_order(tmp_path: Path):
     assert sessions[0]["title"] == "Older chat"
     assert sessions[0]["title_generated"] is True
     store.close()
+
+
+def test_chat_store_turn_scores(tmp_path: Path):
+    store = ChatStore(tmp_path / "chat.db")
+    sid = store.new_session()
+    store.add_message(sid, "user", "Hi")
+    aid = store.add_message(sid, "assistant", "Hello there.")
+    store.add_score(
+        sid,
+        {"overall": 0.8, "spoken_quality": 0.9, "leak_risk": 0.1},
+        message_id=aid,
+        prompt_version=1,
+    )
+    rows = store.recent_scores(limit=5)
+    assert rows[0]["overall"] == 0.8
+    assert rows[0]["prompt_version"] == 1
+    transcripts = store.scored_transcripts()
+    assert transcripts == [("Hi", "Hello there.", 0.8)]
+    store.close()

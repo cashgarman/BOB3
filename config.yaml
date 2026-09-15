@@ -1,7 +1,7 @@
-llm_model: qwen3:4b
+llm_model: deepseek-r1:8b
 stt_model: parakeet-tdt-0.6b-v3
 stt_compute_type: int8_float16
-llm_num_ctx: 4096
+llm_num_ctx: 16384
 tts_voice: af_heart
 tts_speed: 1.0
 tts_mood: neutral
@@ -9,7 +9,7 @@ wake_word: hey_jarvis
 wake_word_enabled: true
 wake_threshold: 0.5
 hotkey: ctrl+shift+alt+f5
-max_silence_sec: 0.2
+max_silence_sec: 0.7
 auto_endpoint: true
 endpoint_silence_ms: 700
 turn_detector: smart_turn
@@ -42,6 +42,14 @@ session_rag_max_inject: 6
 tools_enabled: true
 tool_timeout_sec: 20.0
 max_tool_rounds: 4
+validator_on_tools: true
+score_sample_rate: 0.15
+prompt_lab_enabled: true
+prompt_auto_improve: true
+prompt_min_turns: 30
+prompt_min_improve: 0.05
+prompt_rollback_delta: 0.08
+prompt_cooldown_hours: 24.0
 mcp_servers: []
 theme: midnight
 theme_overrides: {}

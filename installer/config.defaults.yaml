@@ -37,6 +37,14 @@ memory_max_inject: 8
 tools_enabled: true
 tool_timeout_sec: 20.0
 max_tool_rounds: 4
+validator_on_tools: true
+score_sample_rate: 0.15
+prompt_lab_enabled: true
+prompt_auto_improve: true
+prompt_min_turns: 30
+prompt_min_improve: 0.05
+prompt_rollback_delta: 0.08
+prompt_cooldown_hours: 24.0
 mcp_servers: []
 theme: midnight
 theme_overrides: {}

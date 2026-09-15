@@ -12,6 +12,7 @@ def test_settings_defaults():
     assert s.hotkey == "ctrl+shift+space"
     assert s.show_overlay is False
     assert s.tools_enabled is True
+    assert s.prompt_lab_enabled is True
     assert s.auto_endpoint is True
     assert s.theme == "midnight"
 

@@ -320,6 +320,8 @@ def test_is_useless_reply_detects_echo():
 
     assert _is_useless_reply("What time is it now? /no_think", "What time is it now?")
     assert not _is_useless_reply("It's 1:03 PM.", "What time is it now?")
+    assert _is_useless_reply("It's 10:50 PM, Pacific time.", "What season is it?")
+    assert not _is_useless_reply("It's autumn.", "What season is it?")
 
 
 def test_sanitize_spoken_reply_rejects_echo():
@@ -358,9 +360,73 @@ def test_try_direct_answer_feeling():
     assert _try_direct_answer("How are you feeling?") == "I'm doing well and ready to help."
 
 
+def test_try_direct_answer_location():
+    from bob.llm import _try_direct_answer
+
+    assert (
+        _try_direct_answer("I'm in Vernon, British Columbia, Canada.")
+        == "Got it, you're in Vernon, British Columbia, Canada."
+    )
+
+
+def test_format_calendar_tool_result_season():
+    from bob.llm import _format_calendar_tool_result
+
+    stamp = "Monday, September 14, 2026 at 10:50 PM Pacific Daylight Time"
+    assert _format_calendar_tool_result("What season is it?", stamp) == "It's autumn."
+    assert _format_calendar_tool_result("What season of the year is it?", stamp) == "It's autumn."
+    assert "10:50" not in _format_calendar_tool_result("What date is it?", stamp)
+
+
+def test_looks_like_spoken_answer_rejects_planning_meta():
+    from bob.llm import _looks_like_spoken_answer
+
+    bad = (
+        "The extra detail could be about how I'm an AI model that "
+        "processes text without personal preferences."
+    )
+    assert not _looks_like_spoken_answer(bad, "What is your favorite color and why?")
+    assert not _looks_like_spoken_answer(
+        'The sky being blue explanation is in the background too - that\'s perfect to share as the "why" part.',
+        "What is your favorite color and why?",
+    )
+    assert not _looks_like_spoken_answer(
+        "I should make sure the response is accurate and matches their expectations.",
+        "Count back from 10.",
+    )
+
+
+def test_sanitize_spoken_reply_extracts_declared_answer():
+    from bob.llm import _sanitize_spoken_reply
+
+    raw = ' So the answer should be that I don\'t have feelings but can simulate them to help.'
+    assert _sanitize_spoken_reply(raw, user_text="What do you feel about being an AI?") == (
+        "I don't have feelings but can simulate them to help."
+    )
+
+
+def test_try_direct_answer_count_back():
+    from bob.llm import _try_direct_answer
+
+    assert _try_direct_answer("Count back from 10.") == "10, 9, 8, 7, 6, 5, 4, 3, 2, 1."
+
+
+def test_extract_best_spoken_sentence_from_monologue():
+    from bob.llm import _extract_best_spoken_sentence
+
+    raw = (
+        "Okay, the user is asking about my favorite color. Let me think. "
+        "Blue is calming and I like it because it reminds me of the sky."
+    )
+    assert _extract_best_spoken_sentence(raw, "What is your favorite color?") == (
+        "Blue is calming and I like it because it reminds me of the sky."
+    )
+
+
 def test_needs_agentic_tools():
     from bob.llm import needs_agentic_tools
 
+    assert needs_agentic_tools("What season is it?")
     assert not needs_agentic_tools("What's your favorite color?")
     assert not needs_agentic_tools("What's the biggest country in the world?")
     assert needs_agentic_tools("What time is it now?")
@@ -574,7 +640,9 @@ def test_pick_spoken_answer_rejects_planning_sentences():
         "They've been strict about short spoken sentences before. "
         "Russia is the largest country by area."
     )
-    assert _pick_spoken_answer(monologue, "What's the biggest country in the world?") == ""
+    assert _pick_spoken_answer(monologue, "What's the biggest country in the world?") == (
+        "Russia is the largest country by area."
+    )
     assert (
         _pick_spoken_answer(
             'Hmm, Bob should say "I like blue."',
@@ -700,23 +768,32 @@ def test_chat_general_question_skips_tool_rounds():
     tools = [{"type": "function", "function": {"name": "get_current_time", "parameters": {}}}]
     calls = {"stream": 0, "post": 0}
 
+    class FakeStream:
+        is_error = False
+
+        def read(self):
+            return b""
+
+        def iter_lines(self):
+            yield json.dumps(
+                {"message": {"content": "Russia is the largest country by area."}, "done": True}
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
     class FakeClient:
-        def stream(self, *args, **kwargs):
+        def stream(self, method, url, json=None):
             calls["stream"] += 1
-            raise AssertionError("thinking-model general Q&A should not stream")
+            calls["payload"] = json
+            return FakeStream()
 
         def post(self, *args, **kwargs):
             calls["post"] += 1
-            calls["payload"] = kwargs.get("json") or (args[1] if len(args) > 1 else None)
-            response = type("Resp", (), {})()
-            response.raise_for_status = lambda: None
-            response.json = lambda: {
-                "message": {
-                    "thinking": "The user asked a trivia question.",
-                    "content": "Russia is the largest country by area.",
-                }
-            }
-            return response
+            raise AssertionError("chitchat should stream once, not post")
 
         def __enter__(self):
             return self
@@ -734,12 +811,13 @@ def test_chat_general_question_skips_tool_rounds():
             )
         )
     assert chunks == ["Russia is the largest country by area."]
-    assert calls["stream"] == 0
-    assert calls["post"] == 1
+    assert calls["stream"] == 1
+    assert calls["post"] == 0
     payload = calls["payload"]
-    assert payload["think"] is True
+    assert payload["think"] is False
     assert [m["role"] for m in payload["messages"]] == ["system", "user"]
     assert payload["messages"][-1]["content"] == "What's the biggest country in the world?"
+    assert payload["options"]["num_predict"] == 256
 
 
 def test_chat_force_final_for_agentic_question():

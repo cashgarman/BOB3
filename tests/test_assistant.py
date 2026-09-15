@@ -408,6 +408,7 @@ def test_assistant_pipeline_typed_path(ui, tmp_path, monkeypatch):
     assistant.hud = None
     assistant.toast = None
     assistant._ui = lambda fn: fn()
+    monkeypatch.setattr("bob.app.stream_turn", lambda *a, **k: iter(["Hello ", "world."]))
     assistant.state = State.THINKING
     cancel = threading.Event()
 

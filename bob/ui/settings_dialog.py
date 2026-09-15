@@ -120,6 +120,15 @@ class SettingsDialog(ctk.CTkToplevel):
         self._check(frame, "Tools enabled", "tools_enabled")
         self._entry(frame, "Tool timeout seconds", "tool_timeout_sec")
         self._entry(frame, "Max tool rounds per turn", "max_tool_rounds")
+        self._section(frame, "Agents")
+        self._check(frame, "Score tool replies with a validator", "validator_on_tools")
+        self._entry(frame, "Reply score sample rate", "score_sample_rate")
+        self._check(frame, "Prompt lab enabled", "prompt_lab_enabled")
+        self._check(frame, "Auto-improve system prompt", "prompt_auto_improve")
+        self._entry(frame, "Prompt lab min scored turns", "prompt_min_turns")
+        self._entry(frame, "Prompt lab min improvement", "prompt_min_improve")
+        self._entry(frame, "Prompt rollback delta", "prompt_rollback_delta")
+        self._entry(frame, "Prompt cooldown hours", "prompt_cooldown_hours")
 
         ctk.CTkLabel(frame, text="System prompt", anchor="w", **theme.label_style()).pack(fill="x", pady=(10, 2))
         self.prompt = ctk.CTkTextbox(frame, height=120, **theme.textbox())
@@ -311,12 +320,23 @@ class SettingsDialog(ctk.CTkToplevel):
             "max_history_turns",
             "memory_max_inject",
             "max_tool_rounds",
+            "prompt_min_turns",
             "endpoint_silence_ms",
             "barge_in_speech_ms",
             "stt_partial_interval_ms",
             "stt_commit_silence_ms",
         }
-        floats = {"wake_threshold", "vad_threshold", "max_silence_sec", "tool_timeout_sec", "tts_speed"}
+        floats = {
+            "wake_threshold",
+            "vad_threshold",
+            "max_silence_sec",
+            "tool_timeout_sec",
+            "tts_speed",
+            "score_sample_rate",
+            "prompt_min_improve",
+            "prompt_rollback_delta",
+            "prompt_cooldown_hours",
+        }
         problems: list[str] = []
         for key, value in raw.items():
             try:
@@ -351,6 +371,7 @@ def _validate(values: dict) -> list[str]:
         ("max_history_turns", 1, 200),
         ("memory_max_inject", 0, 50),
         ("max_tool_rounds", 1, 10),
+        ("prompt_min_turns", 1, 1000),
         ("endpoint_silence_ms", 100, 10000),
         ("barge_in_speech_ms", 50, 5000),
         ("stt_partial_interval_ms", 50, 5000),
@@ -359,6 +380,10 @@ def _validate(values: dict) -> list[str]:
         ("vad_threshold", 0.0, 1.0),
         ("tool_timeout_sec", 1.0, 600.0),
         ("tts_speed", 0.5, 2.0),
+        ("score_sample_rate", 0.0, 1.0),
+        ("prompt_min_improve", 0.0, 1.0),
+        ("prompt_rollback_delta", 0.0, 1.0),
+        ("prompt_cooldown_hours", 0.0, 720.0),
     )
     for key, low, high in checks:
         if key in values and not (low <= values[key] <= high):

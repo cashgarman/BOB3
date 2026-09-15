@@ -51,6 +51,20 @@ class ChatStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_session
                     ON messages(session_id, id);
+                CREATE TABLE IF NOT EXISTS turn_scores (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    message_id INTEGER,
+                    overall REAL NOT NULL DEFAULT 0,
+                    spoken_quality REAL NOT NULL DEFAULT 0,
+                    grounding REAL NOT NULL DEFAULT 0,
+                    instruction_follow REAL NOT NULL DEFAULT 0,
+                    leak_risk REAL NOT NULL DEFAULT 0,
+                    prompt_version INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_turn_scores_session
+                    ON turn_scores(session_id, id);
                 """
             )
             cols = {str(row[1]) for row in self._conn.execute("PRAGMA table_info(sessions)").fetchall()}
@@ -181,6 +195,84 @@ class ChatStore:
                 "count": int(row["n"] or 0),
             }
             for row in rows
+        ]
+
+    def add_score(
+        self,
+        session_id: int,
+        scores: dict,
+        message_id: int | None = None,
+        prompt_version: int = 0,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO turn_scores (
+                    session_id, message_id, overall, spoken_quality, grounding,
+                    instruction_follow, leak_risk, prompt_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(session_id),
+                    None if message_id is None else int(message_id),
+                    float(scores.get("overall") or 0),
+                    float(scores.get("spoken_quality") or 0),
+                    float(scores.get("grounding") or 0),
+                    float(scores.get("instruction_follow") or 0),
+                    float(scores.get("leak_risk") or 0),
+                    int(scores.get("prompt_version") or prompt_version or 0),
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def recent_scores(self, limit: int = 30, session_id: int | None = None) -> list[dict]:
+        sql = """
+            SELECT overall, spoken_quality, grounding, instruction_follow, leak_risk,
+                   prompt_version, created_at, session_id, message_id
+            FROM turn_scores
+        """
+        params: list = []
+        if session_id is not None:
+            sql += " WHERE session_id = ?"
+            params.append(int(session_id))
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "overall": float(row["overall"] or 0),
+                "spoken_quality": float(row["spoken_quality"] or 0),
+                "grounding": float(row["grounding"] or 0),
+                "instruction_follow": float(row["instruction_follow"] or 0),
+                "leak_risk": float(row["leak_risk"] or 0),
+                "prompt_version": int(row["prompt_version"] or 0),
+                "created_at": str(row["created_at"] or ""),
+                "session_id": int(row["session_id"]),
+                "message_id": None if row["message_id"] is None else int(row["message_id"]),
+            }
+            for row in rows
+        ]
+
+    def scored_transcripts(self, limit: int = 40) -> list[tuple[str, str, float]]:
+        sql = """
+            SELECT s.overall, u.content AS user_text, a.content AS assistant_text
+            FROM turn_scores s
+            JOIN messages a ON a.id = s.message_id AND a.role = 'assistant'
+            JOIN messages u ON u.id = (
+                SELECT MAX(m.id) FROM messages m
+                WHERE m.session_id = a.session_id AND m.role = 'user' AND m.id < a.id
+            )
+            WHERE s.message_id IS NOT NULL
+            ORDER BY s.id DESC
+            LIMIT ?
+        """
+        with self._lock:
+            rows = self._conn.execute(sql, (int(limit),)).fetchall()
+        return [
+            (str(row["user_text"] or ""), str(row["assistant_text"] or ""), float(row["overall"] or 0))
+            for row in reversed(list(rows))
         ]
 
     def close(self) -> None:

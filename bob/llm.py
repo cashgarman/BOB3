@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from collections.abc import Callable, Iterator
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -33,9 +34,20 @@ _MONOLOGUE_RE = re.compile(
 )
 _META_REPLY_RE = re.compile(
     r"\b(should say|should respond|should call|needs to call|the user|the tool|bob should|"
-    r"main point is|key here is|i(?:['’]ll| will)|better not|best to|"
+    r"the answer should be|answer should be|i should make sure|should make sure|"
+    r"main point is|key here is|extra detail could be|without personal preferences|"
+    r"in the background|perfect to share|matches their expectations|"
+    r"explanation is in the background|share as the|"
+    r"i(?:['’]ll| will)|better not|best to|"
     r"they(?:['’]ve| have) been|without overthinking|without caveats|"
     r"universally (?:acceptable|accepted)|pretend i|overthinking|no_think)\b",
+    re.IGNORECASE,
+)
+_PLANNING_REPLY_RE = re.compile(
+    r"\b(the answer should be|answer should be|i should make sure|should make sure|"
+    r"in the background|perfect to share|that's perfect to|matches their expectations|"
+    r"explanation is in the background|share as the|for your use only|"
+    r"background too|planned the reply|meant to be heard)\b",
     re.IGNORECASE,
 )
 _QUOTED_ANSWER_RE = re.compile(r'"([^"\n]{5,160})"')
@@ -59,7 +71,12 @@ _MATH_PLUS_RE = re.compile(
     r"(?:what(?:'s| is|s)?)\s*(\d+)\s*(?:plus|\+)\s*(\d+)",
     re.IGNORECASE,
 )
+_COUNT_BACK_RE = re.compile(r"\bcount\s+(?:down\s+|back\s+)?from\s+(\d+)\b", re.IGNORECASE)
 _FEELING_RE = re.compile(r"\bhow (?:are you feeling|do you feel|you feeling)\b", re.IGNORECASE)
+_LOCATION_STATED_RE = re.compile(
+    r"^\s*(?:i(?:['’]m| am) (?:in|from)|i live in)\s+(.+?)\s*$",
+    re.IGNORECASE,
+)
 
 
 def needs_conversation_log(user_text: str) -> bool:
@@ -83,7 +100,7 @@ def needs_conversation_log(user_text: str) -> bool:
 
 def needs_agentic_tools(user_text: str) -> bool:
     """Only run tool-selection rounds when the user likely needs a tool."""
-    if needs_current_time(user_text) or needs_conversation_log(user_text):
+    if needs_current_time(user_text) or needs_conversation_log(user_text) or needs_calendar_context(user_text):
         return True
     if _needs_web_search(user_text) or needs_chat_context(user_text):
         return True
@@ -189,6 +206,27 @@ def needs_current_time(user_text: str) -> bool:
     return any(k in t for k in keys)
 
 
+_CALENDAR_RE = re.compile(
+    r"\b(season|what date|what's the date|whats the date|what day is it|"
+    r"what month|what year is it|today's date|todays date|day of the week|"
+    r"date today|today's day)\b",
+    re.IGNORECASE,
+)
+_SORRY_FALLBACK_RE = re.compile(
+    r"^sorry,?\s+i didn't (?:get|catch) that\.?$|^sorry,?\s+i got stuck for a moment\.?$",
+    re.IGNORECASE,
+)
+
+
+def needs_calendar_context(user_text: str) -> bool:
+    """Season/date questions need the clock, then a spoken interpretation."""
+    return bool(_CALENDAR_RE.search(user_text or ""))
+
+
+def is_failure_reply(text: str) -> bool:
+    return bool(_SORRY_FALLBACK_RE.match((text or "").strip()))
+
+
 def _try_direct_answer(user_text: str) -> str:
     """Answer simple deterministic questions without calling the LLM."""
     t = (user_text or "").strip()
@@ -202,12 +240,24 @@ def _try_direct_answer(user_text: str) -> str:
         return str(int(match.group(1)) + int(match.group(2)))
     if _FEELING_RE.search(t):
         return "I'm doing well and ready to help."
+    count = _COUNT_BACK_RE.search(t)
+    if count:
+        n = int(count.group(1))
+        if 1 <= n <= 20:
+            return ", ".join(str(i) for i in range(n, 0, -1)) + "."
+    loc = _LOCATION_STATED_RE.search(t)
+    if loc:
+        place = loc.group(1).strip().rstrip(".!?")
+        if 2 <= len(place) <= 80:
+            return f"Got it, you're in {place}."
     return ""
 
 
 _BAD_ANSWER_START_RE = re.compile(
     r"^(?:it covers|i recall(?: that)?|first,?|as bob,?|hmm,?|okay,?|the user|let me|"
-    r"we are given|i need to|no extra|since|so,?|wait,?|better not|best to)\b",
+    r"the extra detail|the sky being|i should|we are given|i need to|no extra|"
+    r"since they\b|since the user\b|since we are\b|"
+    r"so,?|wait,?|better not|best to|\"?\s*so the answer)\b",
     re.IGNORECASE,
 )
 _INSTRUCTION_ECHO_RE = re.compile(
@@ -274,11 +324,14 @@ def _looks_like_spoken_answer(text: str, question: str = "") -> bool:
     t = (text or "").strip()
     if not t:
         return False
+    if is_failure_reply(t):
+        return False
     if (
         _echoes_prompt(t)
         or _INSTRUCTION_ECHO_RE.search(t)
         or _BAD_ANSWER_START_RE.search(t)
         or _is_instruction_monologue(t)
+        or _is_planning_reply(t)
         or _looks_incomplete_spoken(t)
     ):
         return False
@@ -295,10 +348,12 @@ def _looks_like_spoken_answer(text: str, question: str = "") -> bool:
         return True
     if t[-1] in ".!?" and len(t) <= max_chars:
         return bool(re.findall(r"[a-z0-9']+", t.lower()))
+    word_count = len(re.findall(r"[a-z0-9']+", t.lower()))
     if (
         len(t) <= min(120, max_chars)
         and not _looks_incomplete_spoken(t)
-        and len(re.findall(r"[a-z0-9']+", t.lower())) >= 2
+        and not _is_planning_reply(t)
+        and word_count >= (1 if len(t) <= 40 else 2)
     ):
         return True
     return False
@@ -338,6 +393,10 @@ def _is_useless_reply(reply: str, user_text: str) -> bool:
         return True
     if "/no_think" in (reply or "").lower() and len(spoken) <= max(len(asked) + 12, 24):
         return True
+    if "season" in asked and not any(
+        name in spoken for name in ("spring", "summer", "autumn", "fall", "winter")
+    ):
+        return True
     return False
 
 
@@ -359,6 +418,10 @@ def _is_internal_monologue(text: str) -> bool:
 
 def _looks_like_meta_reply(text: str) -> bool:
     return bool(_META_REPLY_RE.search(text or ""))
+
+
+def _is_planning_reply(text: str) -> bool:
+    return bool(_PLANNING_REPLY_RE.search(text or "")) or _looks_like_meta_reply(text)
 
 
 def _extract_quoted_answer(text: str) -> str:
@@ -386,6 +449,39 @@ def _extract_last_short_line(text: str) -> str:
     return ""
 
 
+def _extract_declared_answer(text: str) -> str:
+    """Pull the spoken clause out of planning like 'the answer should be that ...'."""
+    match = re.search(
+        r"(?:the answer should be|i should say|bob should say|so the answer is)\s+(?:that\s+)?(.+)",
+        text or "",
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    answer = match.group(1).strip().strip('"').strip("'")
+    return answer.rstrip(".,; ")
+
+
+def _extract_best_spoken_sentence(text: str, question: str = "") -> str:
+    """Pick the last sentence that looks like a spoken answer."""
+    declared = _extract_declared_answer(text)
+    if declared:
+        if declared[-1] not in ".!?":
+            declared += "."
+        if _looks_like_spoken_answer(declared, question):
+            return declared
+    for sentence in reversed(re.findall(r"[^.!?]+[.!?]", text or "")):
+        line = sentence.strip()
+        if not line or len(line) > _SPOKEN_REPLY_MAX_CHARS:
+            continue
+        if _is_internal_monologue(line) or _is_instruction_monologue(line):
+            continue
+        if question and not _looks_like_spoken_answer(line, question):
+            continue
+        return line
+    return ""
+
+
 def _format_time_tool_result(raw: str) -> str:
     text = (raw or "").strip()
     match = _TIME_TOOL_RE.search(text)
@@ -398,8 +494,75 @@ def _format_time_tool_result(raw: str) -> str:
     return ""
 
 
+_MONTH_TO_SEASON = {
+    1: "winter",
+    2: "winter",
+    3: "spring",
+    4: "spring",
+    5: "spring",
+    6: "summer",
+    7: "summer",
+    8: "summer",
+    9: "autumn",
+    10: "autumn",
+    11: "autumn",
+    12: "winter",
+}
+_CALENDAR_STAMP_RE = re.compile(
+    r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),\s+"
+    r"(January|February|March|April|May|June|July|August|September|October|November|December)"
+    r"\s+(\d{1,2}),\s+(\d{4})",
+    re.IGNORECASE,
+)
+_MONTH_INDEX = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+
+
+def _format_calendar_tool_result(question: str, raw: str) -> str:
+    """Turn a clock tool stamp into a season/date answer, never a clock-only reply."""
+    text = (raw or "").strip()
+    match = _CALENDAR_STAMP_RE.search(text)
+    if match:
+        weekday, month_name, day, year = match.groups()
+        month = _MONTH_INDEX[month_name.lower()]
+    else:
+        now = datetime.now()
+        weekday, month_name, day, year, month = (
+            now.strftime("%A"),
+            now.strftime("%B"),
+            str(now.day),
+            str(now.year),
+            now.month,
+        )
+    season = _MONTH_TO_SEASON[month]
+    q = (question or "").lower()
+    if "season" in q:
+        return f"It's {season}."
+    if "month" in q:
+        return f"It's {month_name}."
+    if "year" in q:
+        return f"It's {year}."
+    if "day" in q:
+        return f"It's {weekday}, {month_name} {day}."
+    return f"Today is {weekday}, {month_name} {day}, {year}."
+
+
 def _fallback_from_tool_history(history: list[dict[str, Any]], user_text: str = "") -> str:
-    if not needs_current_time(user_text):
+    calendar = needs_calendar_context(user_text)
+    clock = needs_current_time(user_text)
+    if not calendar and not clock:
         return ""
     for msg in reversed(history):
         if msg.get("role") != "tool":
@@ -407,6 +570,8 @@ def _fallback_from_tool_history(history: list[dict[str, Any]], user_text: str = 
         name = str(msg.get("tool_name") or "").strip()
         content = str(msg.get("content") or "").strip()
         if name == "get_current_time" and content:
+            if calendar:
+                return _format_calendar_tool_result(user_text, content)
             return _format_time_tool_result(content)
     return ""
 
@@ -463,10 +628,21 @@ def _pick_spoken_answer(raw: str, question: str) -> str:
         return text
     if _is_instruction_monologue(text):
         return ""
+    declared = _extract_declared_answer(text)
+    if declared:
+        if declared[-1] not in ".!?":
+            declared += "."
+        if _looks_like_spoken_answer(declared, question):
+            return declared
     quoted = _extract_quoted_answer(text)
     if quoted and _looks_like_spoken_answer(quoted, question):
         return quoted
-    return ""
+    sentences = [part.strip() for part in re.findall(r"[^.!?]+[.!?]", text) if part.strip()]
+    if sentences:
+        joined = " ".join(sentences[:3]).strip()
+        if joined and _looks_like_spoken_answer(joined, question):
+            return joined
+    return _extract_best_spoken_sentence(text, question)
 
 
 def _finalize_spoken_reply(
@@ -502,15 +678,16 @@ def _sanitize_spoken_reply(
             if fallback:
                 return fallback
         return ""
-    if not _is_internal_monologue(t) and not _is_instruction_monologue(t):
+    picked = _pick_spoken_answer(t, user_text)
+    if picked:
+        return picked
+    if _looks_like_spoken_answer(t, user_text):
         if len(t) <= _SPOKEN_REPLY_MAX_CHARS:
             return t
         short = _extract_last_short_line(t)
-        return short or t[:_SPOKEN_REPLY_MAX_CHARS].rsplit(" ", 1)[0].strip()
-    for extractor in (_extract_quoted_answer,):
-        hit = extractor(t)
-        if hit and _looks_like_spoken_answer(hit, user_text):
-            return hit
+        if short and _looks_like_spoken_answer(short, user_text):
+            return short
+        return t[:_SPOKEN_REPLY_MAX_CHARS].rsplit(" ", 1)[0].strip()
     if history:
         return _fallback_from_tool_history(history, user_text)
     return ""
@@ -968,6 +1145,7 @@ class OllamaChat:
         self.last_internal_thought = ""
         self.compress_threshold = 0.40
         self.on_index_overflow: Callable[[list[dict[str, Any]]], None] | None = None
+        self.last_turn_scores: dict[str, Any] = {}
 
     def context_usage(self) -> float | None:
         """Last prompt token count as a fraction of the configured context window."""
@@ -1052,6 +1230,24 @@ class OllamaChat:
         parts = [load_system_prompt()]
         if with_tools:
             parts.append(load_tool_guidance())
+        context_bits: list[str] = []
+        if self.session_summary.strip():
+            context_bits.append(
+                "Earlier in this chat (background only — do not read aloud):\n"
+                f"{self.session_summary.strip()}"
+            )
+        if (memory_block or "").strip():
+            context_bits.append(memory_block.strip())
+        if context_bits:
+            parts.append(
+                "Background (for your use only — never read aloud):\n\n"
+                + "\n\n".join(context_bits)
+            )
+        return "\n\n".join(p for p in parts if p)
+
+    def _answer_system(self, memory_block: str = "") -> str:
+        """Answer-focused system prompt for one-shot chitchat generation."""
+        parts = [load_answer_prompt()]
         context_bits: list[str] = []
         if self.session_summary.strip():
             context_bits.append(
@@ -1328,44 +1524,31 @@ class OllamaChat:
         question = (question or "").strip()
         if not question:
             return "Sorry, I didn't catch that."
-        if on_tool and (memory_block or "").strip():
-            tool_results = [("background", memory_block)]
-            reply = self._synthesize_from_tools(
-                question,
-                tool_results,
-                memory_block="",
-                history=self._history_for_answer(question),
-            )
-            if reply:
-                return reply
         messages = self._answer_messages(
             question,
             memory_block=memory_block,
             history=self._history_for_answer(question),
         )
-        use_think = self._thinks()
-        for attempt in range(2):
-            predict = 160
-            if use_think:
-                predict = 512 if attempt == 0 else 768
-            try:
-                content, _thinking, _meta = self._post_chat(
-                    messages,
-                    num_predict=predict,
-                    temperature=0.3,
-                    think=True if use_think else False,
-                )
-            except Exception as exc:
-                log.warning("Spoken answer failed: %s", exc)
-                return "Sorry, I got stuck for a moment."
-            raw = _strip_control_tokens(_strip_think_blocks(content or "")).strip()
-            picked = _pick_spoken_answer(raw, question)
-            if picked:
-                return picked
-            if raw and not _is_internal_monologue(raw):
-                line = _extract_last_short_line(raw)
-                if line and _looks_like_spoken_answer(line, question):
-                    return line
+        try:
+            content, thinking, _meta = self._post_chat(
+                messages,
+                num_predict=_CHAT_NUM_PREDICT,
+                temperature=0.3,
+                think=False,
+            )
+        except Exception as exc:
+            log.warning("Spoken answer failed: %s", exc)
+            return "Sorry, I got stuck for a moment."
+        raw = _strip_control_tokens(_strip_think_blocks(content or "")).strip()
+        if not raw:
+            raw = _strip_control_tokens(_strip_think_blocks(thinking or "")).strip()
+        picked = _pick_spoken_answer(raw, question)
+        if picked:
+            return picked
+        if raw and not _is_internal_monologue(raw):
+            line = _extract_last_short_line(raw)
+            if line and _looks_like_spoken_answer(line, question):
+                return line
         return "Sorry, I didn't get that."
 
     def _recover_reply(
@@ -1380,6 +1563,14 @@ class OllamaChat:
         direct = _try_direct_answer(question)
         if direct:
             return direct
+        if needs_calendar_context(question) and on_tool:
+            try:
+                stamp = on_tool("get_current_time", {})
+            except Exception:
+                stamp = ""
+            calendar = _format_calendar_tool_result(question, stamp)
+            if calendar:
+                return calendar
         if _fresh_web_search(question) and on_tool:
             reply = self._answer_from_web_search(question, on_tool)
             if reply:
@@ -1405,249 +1596,22 @@ class OllamaChat:
         on_thought: Callable[[str], None] | None = None,
         cancel: threading.Event | None = None,
         max_rounds: int = 1,
+        runtime: Any | None = None,
     ) -> Iterator[str]:
-        """Stream a spoken reply, running any tool the model asks for first."""
-        spoken_user = user_text
-        self.last_internal_thought = ""
-        if self._tools_unsupported:
-            tools = None
-            on_tool = None
-        self.history.append({"role": "user", "content": spoken_user})
-        self._trim()
-        self._manage_context()
-        if tools and on_tool and self._thinks() and not needs_agentic_tools(spoken_user) and not _try_direct_answer(spoken_user):
-            tools = None
-            on_tool = None
-        agentic = bool(tools) and on_tool is not None
-        tool_rounds = max(1, int(max_rounds)) if agentic else 0
-        if needs_current_time(spoken_user) and on_tool:
-            try:
-                result = on_tool("get_current_time", {})
-            except Exception as exc:
-                result = f"Error: tool 'get_current_time' failed: {exc}"
-            reply = _format_time_tool_result(result)
-            if reply:
-                self._append_internal_thought("Called get_current_time directly (skipped LLM).", on_thought)
-                self.history.append({"role": "tool", "tool_name": "get_current_time", "content": result})
-                self.history.append({"role": "assistant", "content": reply})
-                yield reply
-                return
-        if _fresh_web_search(spoken_user) and on_tool:
-            reply = self._answer_from_web_search(spoken_user, on_tool, on_thought)
-            if reply:
-                yield reply
-                return
-        if _is_web_search_followup(spoken_user, self.history) and on_tool:
-            query = _web_search_followup_query(self.history, spoken_user)
-            reply = self._answer_from_web_search(
-                spoken_user,
-                on_tool,
-                on_thought,
-                query=query,
-                thought="Retried the web search using your earlier request.",
-            )
-            if reply:
-                yield reply
-                return
-        direct = _try_direct_answer(spoken_user)
-        if direct:
-            self._append_internal_thought("Answered directly.", on_thought)
-            self.history.append({"role": "assistant", "content": direct})
-            yield direct
-            return
-        if self._thinks() and not agentic:
-            reply = self._generate_spoken_answer(spoken_user, memory_block=memory_block, on_tool=on_tool)
-            self._append_internal_thought("Answered with a direct generation pass.", on_thought)
-            self.history.append({"role": "assistant", "content": reply})
-            yield reply
-            return
-        force_final = False
-        streamed_to_user = False
-        for index in range(tool_rounds + 1):
-                if cancel is not None and cancel.is_set():
-                    return
-                if index > 0:
-                    self._manage_context()
-                # The last pass drops the tools so the model has to answer in words.
-                offered = None if force_final or index >= tool_rounds else tools
-                system = self._system(with_tools=bool(offered), memory_block=memory_block)
-                spoken: list[str] = []
-                round_tools = offered
-                spoken_before = 0
-                try:
-                    content, calls = yield from self._round(
-                        system, round_tools, cancel, spoken, spoken_user, on_thought
-                    )
-                    if len(spoken) > spoken_before:
-                        streamed_to_user = True
-                except GeneratorExit:
-                    # Caller stopped consuming (barge-in / hotkey). Keep what was
-                    # already said so the next turn knows what Bob got through.
-                    partial = "".join(spoken).strip()
-                    if partial and not self._history_ends_with_assistant(partial):
-                        self.history.append({"role": "assistant", "content": partial})
-                    raise
-                except RuntimeError as exc:
-                    if offered and _is_tools_unsupported_error(str(exc)):
-                        self._tools_unsupported = True
-                        log.warning(
-                            "Model %s does not support tools; continuing without tools",
-                            self.model,
-                        )
-                        system = self._system(with_tools=False, memory_block=memory_block)
-                        round_tools = None
-                        content, calls = yield from self._round(
-                            system, round_tools, cancel, spoken, spoken_user, on_thought
-                        )
-                    else:
-                        raise
-                if not calls and offered and on_tool and (
-                    _is_tool_preamble(content) or _is_internal_monologue(content)
-                ):
-                    hinted = _deferral_tool_name(content, spoken_user)
-                    if hinted:
-                        try:
-                            args = _deferral_tool_args(hinted, spoken_user)
-                            result = on_tool(hinted, args)
-                        except Exception as exc:
-                            result = f"Error: tool '{hinted}' failed: {exc}"
-                        if content.strip():
-                            self.history.append({"role": "assistant", "content": content})
-                        self.history.append({"role": "tool", "tool_name": hinted, "content": result})
-                        if hinted in {"web_search", "conversation_log"}:
-                            reply = self._finalize_tool_synthesis(spoken_user, memory_block, on_thought)
-                            if reply:
-                                yield reply
-                                return
-                        continue
-                if not calls and offered:
-                    probe = _strip_control_tokens(_strip_think_blocks(content))
-                    if probe and _is_useless_reply(probe, spoken_user):
-                        if needs_current_time(spoken_user) and on_tool:
-                            try:
-                                result = on_tool("get_current_time", {})
-                            except Exception as exc:
-                                result = f"Error: tool 'get_current_time' failed: {exc}"
-                            self.history.append({"role": "tool", "tool_name": "get_current_time", "content": result})
-                            continue
-                        if needs_chat_context(spoken_user) and not _fresh_web_search(spoken_user) and on_tool:
-                            result = _invoke_conversation_log(on_tool)
-                            self.history.append({"role": "tool", "tool_name": "conversation_log", "content": result})
-                            reply = self._finalize_tool_synthesis(spoken_user, memory_block, on_thought)
-                            if reply:
-                                yield reply
-                                return
-                            continue
-                        if _fresh_web_search(spoken_user) and on_tool:
-                            result = _invoke_web_search(on_tool, spoken_user)
-                            self.history.append({"role": "tool", "tool_name": "web_search", "content": result})
-                            reply = self._finalize_tool_synthesis(spoken_user, memory_block, on_thought)
-                            if reply:
-                                yield reply
-                                return
-                            continue
-                        continue
-                if not calls and offered and content.strip() and _is_internal_monologue(content):
-                    log.warning(
-                        "Discarding internal monologue from tool round (%d chars, model=%s)",
-                        len(content),
-                        self.model,
-                    )
-                    if needs_current_time(spoken_user) and on_tool:
-                        try:
-                            result = on_tool("get_current_time", {})
-                        except Exception as exc:
-                            result = f"Error: tool 'get_current_time' failed: {exc}"
-                        self.history.append({"role": "tool", "tool_name": "get_current_time", "content": result})
-                        continue
-                    if needs_chat_context(spoken_user) and not _fresh_web_search(spoken_user) and on_tool:
-                        result = _invoke_conversation_log(on_tool)
-                        self.history.append({"role": "tool", "tool_name": "conversation_log", "content": result})
-                        reply = self._finalize_tool_synthesis(spoken_user, memory_block, on_thought)
-                        if reply:
-                            yield reply
-                            return
-                        continue
-                    if _fresh_web_search(spoken_user) and on_tool:
-                        result = _invoke_web_search(on_tool, spoken_user)
-                        self.history.append({"role": "tool", "tool_name": "web_search", "content": result})
-                        reply = self._finalize_tool_synthesis(spoken_user, memory_block, on_thought)
-                        if reply:
-                            yield reply
-                            return
-                        continue
-                    direct = _try_direct_answer(spoken_user)
-                    if direct:
-                        self._append_internal_thought(
-                            "Answered directly (skipped tool planning).",
-                            on_thought,
-                        )
-                        yield direct
-                        self.history.append({"role": "assistant", "content": direct})
-                        break
-                    force_final = True
-                    self._append_internal_thought(
-                        "Skipped tool planning; answering directly.",
-                        on_thought,
-                    )
-                    continue
-                if not calls and content.strip():
-                    content = _finalize_spoken_reply(content, self.history, spoken_user)
-                spoken_ok = bool(
-                    content.strip()
-                    and not _is_useless_reply(content, spoken_user)
-                    and _looks_like_spoken_answer(content, spoken_user)
-                )
-                if not calls and not spoken_ok:
-                    if needs_current_time(spoken_user) and on_tool:
-                        try:
-                            result = on_tool("get_current_time", {})
-                        except Exception as exc:
-                            result = f"Error: tool 'get_current_time' failed: {exc}"
-                        self.history.append({"role": "tool", "tool_name": "get_current_time", "content": result})
-                        content = _format_time_tool_result(result)
-                    elif offered:
-                        continue
-                    else:
-                        content = self._recover_reply(
-                            spoken_user,
-                            memory_block=memory_block,
-                            on_tool=on_tool,
-                        )
-                        self._append_internal_thought(
-                            "Initial model reply was unusable; regenerated a short answer.",
-                            on_thought,
-                        )
-                    if content.strip() and not streamed_to_user:
-                        yield content
-                elif not calls and spoken_ok and round_tools:
-                    yield content
-                    streamed_to_user = True
-                if content.strip() or calls:
-                    message: dict[str, Any] = {"role": "assistant", "content": content}
-                    if calls:
-                        message["tool_calls"] = calls
-                    self.history.append(message)
-                if not calls:
-                    break
-                for call in calls:
-                    if cancel is not None and cancel.is_set():
-                        return
-                    function = call.get("function") or {}
-                    name = str(function.get("name") or "").strip()
-                    if not name:
-                        continue
-                    try:
-                        result = on_tool(name, function.get("arguments"))
-                    except Exception as exc:
-                        result = f"Error: tool '{name}' failed: {exc}"
-                    self.history.append({"role": "tool", "tool_name": name, "content": result})
-                if calls and on_tool:
-                    reply = self._finalize_tool_synthesis(spoken_user, memory_block, on_thought)
-                    if reply:
-                        yield reply
-                        return
-        self._trim()
+        """Stream a spoken reply through the LangGraph turn brain."""
+        from bob.agents.graph import stream_turn
+
+        yield from stream_turn(
+            self,
+            user_text,
+            memory_block=memory_block,
+            tools=tools,
+            on_tool=on_tool,
+            on_thought=on_thought,
+            cancel=cancel,
+            max_rounds=max_rounds,
+            runtime=runtime,
+        )
 
     def _history_ends_with_assistant(self, content: str) -> bool:
         if not self.history:
@@ -1687,8 +1651,8 @@ class OllamaChat:
             "options": {
                 "num_ctx": self.num_ctx,
                 "num_predict": (
-                    _THINKING_FINAL_NUM_PREDICT
-                    if self._thinks() and not tools
+                    _CHAT_NUM_PREDICT
+                    if not tools
                     else (_THINKING_CHAT_NUM_PREDICT if self._thinks() else _CHAT_NUM_PREDICT)
                 ),
                 "temperature": 0.4 if self._thinks() else 0.7,

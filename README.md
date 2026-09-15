@@ -103,6 +103,8 @@ All fields are also in **All settings…** and [`config.yaml`](config.yaml).
 
 Bob can call tools mid-turn: it runs them, then speaks the result. Tools run automatically with no confirmation, so the same hotkey that cancels a reply also cancels a tool. Each call is capped by `tool_timeout_sec`, and one turn may use up to `max_tool_rounds` rounds of tool calls before Bob has to answer in words.
 
+Turns are orchestrated by a **LangGraph** state machine (retrieve → orchestrator → tools/memory/speaker → spoken-reply gate → optional validator). The same local Ollama model plays every specialist role. After speech, a background **prompt lab** scores replies, and can auto-apply a new `prompts/system.txt` when a shadow eval improves quality. Versions live in `prompts/versions/`; a live score drop rolls the prompt back and pins it for `prompt_cooldown_hours`.
+
 Built in: `get_current_time`, `open_url`, `notes_read`, `notes_write` (`data\notes.md`), `memory_search`, `set_speech_mood`, `list_speech_moods`.
 
 Speech moods change how Kokoro delivers the rest of the turn (rate, pitch, loudness, pauses) without swapping the selected voice. The model can call `set_speech_mood`, a tool can call `ctx.set_mood("excited")`, or a reply can start with `[mood:excited]`. Default mood is `tts_mood` in settings (also on the tray Voice menu). See [`sdk_examples/10_speech_mood.md`](sdk_examples/10_speech_mood.md).

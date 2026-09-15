@@ -57,6 +57,14 @@ class Settings:
     tools_enabled: bool = True
     tool_timeout_sec: float = 20.0
     max_tool_rounds: int = 4
+    validator_on_tools: bool = True
+    score_sample_rate: float = 0.15
+    prompt_lab_enabled: bool = True
+    prompt_auto_improve: bool = True
+    prompt_min_turns: int = 30
+    prompt_min_improve: float = 0.05
+    prompt_rollback_delta: float = 0.08
+    prompt_cooldown_hours: float = 24.0
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
     # UI theme: a preset name from bob.ui.theme.PRESETS plus per-slot overrides
     # (e.g. {"accent": "#ff8800", "font_family": "Consolas", "appearance": "light"}).
