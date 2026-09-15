@@ -49,7 +49,8 @@ _PLANNING_REPLY_RE = re.compile(
     r"explanation is in the background|share as the|for your use only|"
     r"background too|planned the reply|meant to be heard|design limitations|"
     r"reasoning process|i(?:'|')?m thinking about|let me think|i need to think|"
-    r"might need improvement|would need improvement|still thinking about)\b",
+    r"might need improvement|would need improvement|still thinking about|"
+    r"might improve later|improve later|answer later|will answer later)\b",
     re.IGNORECASE,
 )
 _THIRD_PERSON_SPOKEN_RE = re.compile(
@@ -105,8 +106,67 @@ def needs_conversation_log(user_text: str) -> bool:
     return any(k in t for k in keys)
 
 
-def needs_prompt_files(user_text: str) -> bool:
+def _recent_prompt_edit_context(history: list[dict[str, Any]] | None) -> bool:
+    recent: list[dict[str, Any]] = []
+    for msg in reversed(history or []):
+        if str(msg.get("role") or "") in {"user", "assistant"}:
+            recent.append(msg)
+        if len(recent) >= 6:
+            break
+    markers = (
+        "system prompt",
+        "background-notes",
+        "background notes",
+        "prompt file",
+        "prompt files",
+        "i'd trim",
+        "i would trim",
+        "i'd change",
+        "i would change",
+        "if i changed",
+        "make one small edit",
+        "trim the background",
+        "edit my system prompt",
+        "change your prompt",
+    )
+    for msg in recent:
+        content = str(msg.get("content") or "").lower()
+        if any(marker in content for marker in markers):
+            return True
+    return False
+
+
+def wants_prompt_edit_followup(user_text: str, history: list[dict[str, Any]] | None = None) -> bool:
+    """User approved a prompt change discussed in the previous turn."""
+    t = (user_text or "").lower().strip()
+    if not t or not _recent_prompt_edit_context(history):
+        return False
+    approval_phrases = (
+        "go ahead",
+        "do it",
+        "do that",
+        "make those changes",
+        "make that change",
+        "make the change",
+        "apply that",
+        "apply those",
+        "apply the change",
+        "yes please",
+        "please do",
+        "go for it",
+        "sounds good",
+        "update it",
+        "change it now",
+        "make the edit",
+        "take those changes",
+    )
+    return any(phrase in t for phrase in approval_phrases)
+
+
+def needs_prompt_files(user_text: str, history: list[dict[str, Any]] | None = None) -> bool:
     """User is asking about BOB's prompt templates or instructions on disk."""
+    if wants_prompt_edit_followup(user_text, history):
+        return True
     t = (user_text or "").lower()
     keys = (
         "system prompt",
@@ -168,8 +228,10 @@ def wants_prompt_reflection(user_text: str) -> bool:
     return any(k in t for k in keys)
 
 
-def wants_prompt_edit(user_text: str) -> bool:
+def wants_prompt_edit(user_text: str, history: list[dict[str, Any]] | None = None) -> bool:
     """User wants BOB to change a prompt file on disk, not just discuss it."""
+    if wants_prompt_edit_followup(user_text, history):
+        return True
     t = (user_text or "").lower()
     if wants_prompt_reflection(user_text):
         return False
@@ -236,19 +298,21 @@ def _prompt_reflect_has_substance(text: str) -> bool:
         return False
     if _PLANNING_REPLY_RE.search(t):
         return False
+    if any(phrase in t for phrase in ("might improve", "improve later", "answer later")):
+        return False
     opinion_markers = (
         "i think",
         "i like",
         "i'd",
         "i would",
         "works well",
-        "clear",
         "helpful",
-        "change",
+        "i'd change",
+        "i would change",
+        "if i changed",
         "shorter",
         "longer",
         "better",
-        "improve",
         "add ",
         "remove ",
         "tone",
@@ -1865,37 +1929,36 @@ class OllamaChat:
             "Section 1: the complete new system prompt (plain text only)\n"
             "Section 2: two short spoken sentences confirming what changed (no paths, no markdown)"
         )
-        strict_suffix = (
-            " Apply the requested edits now. Keep BOB's spoken voice-assistant tone."
+        messages: list[dict[str, str]] = [
+            {
+                "role": "system",
+                "content": base_instruction + " Apply the requested edits now. Keep BOB's spoken voice-assistant tone.",
+            }
+        ]
+        messages.extend(self._history_for_answer(question))
+        messages.append(
+            {
+                "role": "user",
+                "content": f"Current system prompt:\n{current}\n\nUser request:\n{question}",
+            }
         )
-        for strict in (False, True):
-            messages: list[dict[str, str]] = [
-                {"role": "system", "content": base_instruction + (strict_suffix if strict else "")}
-            ]
-            messages.extend(self._history_for_answer(question))
-            messages.append(
-                {
-                    "role": "user",
-                    "content": f"Current system prompt:\n{current}\n\nUser request:\n{question}",
-                }
+        try:
+            content, _thinking, _meta = self._post_chat(
+                messages,
+                num_predict=280,
+                temperature=0.2,
+                think=False,
             )
-            try:
-                content, _thinking, _meta = self._post_chat(
-                    messages,
-                    num_predict=420,
-                    temperature=0.2,
-                    think=False,
-                )
-            except Exception as exc:
-                log.warning("Prompt edit synthesis failed: %s", exc)
-                continue
-            new_prompt, spoken = _parse_prompt_edit_response(content or "")
-            spoken = _sanitize_spoken_reply(_strip_think_blocks(spoken), self.history, question)
-            if self._prompt_edit_is_usable(new_prompt, current):
-                self._append_internal_thought("Revised the system prompt on disk.", on_thought)
-                if spoken and _looks_like_spoken_answer(spoken, question):
-                    self.history.append({"role": "assistant", "content": spoken})
-                return new_prompt.strip(), spoken
+        except Exception as exc:
+            log.warning("Prompt edit synthesis failed: %s", exc)
+            return "", ""
+        new_prompt, spoken = _parse_prompt_edit_response(content or "")
+        spoken = _sanitize_spoken_reply(_strip_think_blocks(spoken), self.history, question)
+        if self._prompt_edit_is_usable(new_prompt, current):
+            self._append_internal_thought("Revised the system prompt on disk.", on_thought)
+            if spoken and _looks_like_spoken_answer(spoken, question):
+                self.history.append({"role": "assistant", "content": spoken})
+            return new_prompt.strip(), spoken
         return "", ""
 
     def _finalize_tool_synthesis(

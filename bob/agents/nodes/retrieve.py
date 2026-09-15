@@ -8,6 +8,7 @@ from bob.llm import (
     needs_chat_context,
     needs_conversation_log,
     needs_current_time,
+    needs_prompt_files,
 )
 
 
@@ -19,12 +20,15 @@ def retrieve_node(state: TurnState) -> dict[str, Any]:
     if not llm.history or llm.history[-1].get("role") != "user" or str(llm.history[-1].get("content") or "") != user_text:
         llm.history.append({"role": "user", "content": user_text})
     llm._trim()
-    llm._manage_context()
+    fast_prompt = needs_prompt_files(user_text, llm.history)
+    if not fast_prompt:
+        llm._manage_context()
 
     memory_block = str(state.get("memory_block") or "")
-    if not memory_block.strip():
+    if not memory_block.strip() and not fast_prompt:
         memory_block = _retrieve_memory(runtime, user_text)
-    memory_block = _prefetch_tool_context(runtime, user_text, memory_block)
+    if not fast_prompt:
+        memory_block = _prefetch_tool_context(runtime, user_text, memory_block)
     return {"memory_block": memory_block}
 
 

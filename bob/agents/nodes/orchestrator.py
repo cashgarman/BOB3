@@ -27,29 +27,7 @@ def choose_route(
     """Heuristic router. LLM routing is reserved for ambiguous agentic turns."""
     if tools_unsupported:
         has_tools = False
-    if needs_prompt_files(user_text) and has_tools:
-        # #region agent log
-        try:
-            import json
-            import time
-            from pathlib import Path
-
-            Path(__file__).resolve().parents[3].joinpath("debug-234d60.log").open("a", encoding="utf-8").write(
-                json.dumps(
-                    {
-                        "sessionId": "234d60",
-                        "hypothesisId": "C",
-                        "location": "orchestrator.py:choose_route",
-                        "message": "prompt files route selected",
-                        "data": {"user_text": user_text[:120]},
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-        except Exception:
-            pass
-        # #endregion
+    if needs_prompt_files(user_text, history) and has_tools:
         return "tools", "prompts"
     if needs_calendar_context(user_text) and has_tools:
         return "tools", "calendar"

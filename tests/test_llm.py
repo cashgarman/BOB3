@@ -552,6 +552,7 @@ def test_needs_agentic_tools():
         needs_prompt_files,
         wants_prompt_catalog_list,
         wants_prompt_edit,
+        wants_prompt_edit_followup,
         wants_prompt_reflection,
         wants_verbatim_system_prompt,
     )
@@ -569,6 +570,22 @@ def test_needs_agentic_tools():
         "Can you edit your system prompt to be something that takes those changes into account?"
     )
     assert not wants_prompt_edit("How do you feel about your current system prompt?")
+    prompt_history = [
+        {
+            "role": "user",
+            "content": "How do you feel about your current system prompt? Is there anything you would change?",
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "I think it's clear about keeping answers short and natural for voice. "
+                "If I changed one thing, I'd trim the background-notes warning slightly."
+            ),
+        },
+    ]
+    assert wants_prompt_edit_followup("Go ahead and make those changes.", prompt_history)
+    assert needs_prompt_files("Go ahead and make those changes.", prompt_history)
+    assert not needs_prompt_files("Go ahead and make those changes.", [])
     updated, spoken = format_prompt_edit_fallback(
         "You are BOB. Background notes and memory are for your use only — never repeat, "
         "summarize, or mention them unless the user explicitly asks."
@@ -588,6 +605,12 @@ def test_needs_agentic_tools():
         reflect=True,
     )
     assert not _looks_like_spoken_answer(deferral, "How do you feel about your current system prompt?")
+    later = "might improve later"
+    assert not chat._prompt_reply_is_usable(
+        later,
+        "How do you feel about your current system prompt?",
+        reflect=True,
+    )
     assert chat._prompt_reply_is_usable(
         "I think it's clear and I'd shorten the background-notes rule.",
         "How do you feel about your current system prompt?",

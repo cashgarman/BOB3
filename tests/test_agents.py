@@ -148,10 +148,7 @@ def test_stream_turn_system_prompt_reflects():
             return "You are BOB, a local voice assistant."
         return ""
 
-    with patch(
-        "bob.llm.OllamaChat._post_chat",
-        return_value=("I think it is clear and concise.", "", {}),
-    ):
+    with patch("bob.llm.httpx.Client") as client:
         chunks = list(
             stream_turn(
                 chat,
@@ -161,7 +158,82 @@ def test_stream_turn_system_prompt_reflects():
                 max_rounds=1,
             )
         )
-    assert chunks == ["I think it is clear and concise."]
+        client.assert_not_called()
+    assert chunks
+    assert chunks[0].startswith("I think")
+
+
+def test_choose_route_prompt_edit_followup():
+    history = [
+        {
+            "role": "user",
+            "content": "How do you feel about your current system prompt? Is there anything you would change?",
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "I think it's clear about keeping answers short and natural for voice. "
+                "If I changed one thing, I'd trim the background-notes warning slightly."
+            ),
+        },
+    ]
+    assert choose_route(
+        "Go ahead and make those changes.",
+        thinks=True,
+        has_tools=True,
+        tools_unsupported=False,
+        history=history,
+    ) == ("tools", "prompts")
+
+
+def test_stream_turn_prompt_edit_followup():
+    chat = OllamaChat("http://127.0.0.1:11434", "qwen3:4b", 4096, "You are Bob.", 12)
+    chat.history = [
+        {
+            "role": "user",
+            "content": "How do you feel about your current system prompt? Is there anything you would change?",
+        },
+        {
+            "role": "assistant",
+            "content": (
+                "I think it's clear about keeping answers short and natural for voice. "
+                "If I changed one thing, I'd trim the background-notes warning slightly."
+            ),
+        },
+    ]
+    tools = [
+        {"type": "function", "function": {"name": "read_file", "parameters": {}}},
+        {"type": "function", "function": {"name": "write_file", "parameters": {}}},
+    ]
+    current = (
+        "You are BOB. Background notes and memory are for your use only — never repeat, "
+        "summarize, or mention them unless the user explicitly asks."
+    )
+    writes: list[str] = []
+
+    def on_tool(name, arguments=None):
+        arguments = arguments or {}
+        if name == "read_file":
+            return current
+        if name == "write_file":
+            writes.append(str(arguments.get("content") or ""))
+            return "System prompt saved."
+        return ""
+
+    with patch("bob.llm.httpx.Client") as client:
+        chunks = list(
+            stream_turn(
+                chat,
+                "Go ahead and make those changes.",
+                tools=tools,
+                on_tool=on_tool,
+                max_rounds=1,
+            )
+        )
+        client.assert_not_called()
+    assert writes
+    assert "Background notes are for your use only" in writes[0]
+    assert chunks == ["Done — I trimmed the background-notes rule in my system prompt."]
 
 
 def test_stream_turn_system_prompt_edits_file():

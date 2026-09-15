@@ -30,12 +30,14 @@ from bob.llm import (
     PROMPT_FILE_FOR_REFLECT,
     format_prompt_catalog_reply,
     format_prompt_edit_fallback,
+    format_prompt_reflect_fallback,
     format_prompt_spoken_reply,
     needs_chat_context,
     needs_current_time,
     needs_prompt_files,
     wants_prompt_catalog_list,
     wants_prompt_edit,
+    wants_prompt_edit_followup,
     wants_prompt_reflection,
     wants_verbatim_system_prompt,
 )
@@ -77,30 +79,8 @@ def tools_node(state: TurnState) -> dict[str, Any]:
     results: list[tuple[str, str]] = []
 
     if kind == "prompts" and on_tool:
-        # #region agent log
-        try:
-            import json
-            import time
-            from pathlib import Path
-
-            Path(__file__).resolve().parents[3].joinpath("debug-234d60.log").open("a", encoding="utf-8").write(
-                json.dumps(
-                    {
-                        "sessionId": "234d60",
-                        "hypothesisId": "A",
-                        "location": "tools.py:prompts",
-                        "message": "deterministic prompt file route",
-                        "data": {"user_text": user_text[:120]},
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-        except Exception:
-            pass
-        # #endregion
         branch = "verbatim"
-        if wants_prompt_edit(user_text):
+        if wants_prompt_edit(user_text, llm.history) or wants_prompt_edit_followup(user_text, llm.history):
             branch = "edit"
         elif wants_prompt_reflection(user_text):
             branch = "reflect"
@@ -110,28 +90,6 @@ def tools_node(state: TurnState) -> dict[str, Any]:
             branch = "verbatim"
         else:
             branch = "catalog"
-        # #region agent log
-        try:
-            import json
-            import time
-            from pathlib import Path
-
-            Path(__file__).resolve().parents[3].joinpath("debug-234d60.log").open("a", encoding="utf-8").write(
-                json.dumps(
-                    {
-                        "sessionId": "234d60",
-                        "hypothesisId": "B",
-                        "location": "tools.py:prompts",
-                        "message": "prompt branch selected",
-                        "data": {"user_text": user_text[:120], "branch": branch},
-                        "timestamp": int(time.time() * 1000),
-                    }
-                )
-                + "\n"
-            )
-        except Exception:
-            pass
-        # #endregion
         if branch == "edit":
             llm._append_internal_thought("Prompt edit: reading system prompt from disk.", on_thought)
             try:
@@ -142,16 +100,13 @@ def tools_node(state: TurnState) -> dict[str, Any]:
                 {"role": "tool", "tool_name": "read_file", "content": f"prompts/system.txt\n{system_text}"}
             )
             results = [("read_file", system_text)]
-            new_prompt, spoken = llm.synthesize_system_prompt_edit(
-                user_text,
-                system_text,
-                on_thought=on_thought,
-            )
-            source = "prompt_edit" if new_prompt else ""
-            if not new_prompt:
-                new_prompt, spoken = format_prompt_edit_fallback(system_text)
-                if new_prompt and new_prompt.strip() != (system_text or "").strip():
-                    source = "edit_fallback"
+            new_prompt, spoken = format_prompt_edit_fallback(system_text)
+            if not new_prompt or new_prompt.strip() == (system_text or "").strip():
+                new_prompt, spoken = llm.synthesize_system_prompt_edit(
+                    user_text,
+                    system_text,
+                    on_thought=on_thought,
+                )
             if new_prompt and new_prompt.strip() != (system_text or "").strip():
                 try:
                     write_result = on_tool(
@@ -171,41 +126,28 @@ def tools_node(state: TurnState) -> dict[str, Any]:
             reply = spoken
             if not reply and new_prompt and new_prompt.strip() != (system_text or "").strip():
                 reply = "Done — I updated my system prompt."
-                source = source or "edit_confirm"
             if not reply:
                 reply = "I couldn't update my system prompt right now."
-                source = "edit_failed"
             llm.history.append({"role": "assistant", "content": reply})
-            # #region agent log
-            try:
-                import json
-                import time
-                from pathlib import Path
+            return _spoken_update(reply, used_tools=True, results=results, trusted=True)
 
-                Path(__file__).resolve().parents[3].joinpath("debug-234d60.log").open("a", encoding="utf-8").write(
-                    json.dumps(
-                        {
-                            "sessionId": "234d60",
-                            "hypothesisId": "E",
-                            "location": "tools.py:prompts",
-                            "message": "prompt edit outcome",
-                            "data": {
-                                "branch": branch,
-                                "source": source,
-                                "reply_preview": (reply or "")[:80],
-                                "wrote_file": bool(
-                                    new_prompt and new_prompt.strip() != (system_text or "").strip()
-                                ),
-                            },
-                            "timestamp": int(time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-            except Exception:
-                pass
-            # #endregion
-            return _spoken_update(reply, used_tools=True, results=results)
+        if branch == "reflect":
+            llm._append_internal_thought("Prompt reflection: reading system prompt from disk.", on_thought)
+            results: list[tuple[str, str]] = []
+            try:
+                system_body = on_tool("read_file", {"path": "prompts/system.txt"})
+            except Exception as exc:
+                system_body = f"Error: tool 'read_file' failed: {exc}"
+            llm.history.append(
+                {"role": "tool", "tool_name": "read_file", "content": f"prompts/system.txt\n{system_body}"}
+            )
+            results.append(("read_file", system_body))
+            reply = format_prompt_reflect_fallback(system_body)
+            llm._append_internal_thought("Reflected on the prompt files.", on_thought)
+            if reply:
+                llm.history.append({"role": "assistant", "content": reply})
+            if reply:
+                return _spoken_update(reply, used_tools=True, results=results, trusted=True)
 
         llm._append_internal_thought("Prompt question: reading prompt catalog from disk.", on_thought)
         try:
@@ -215,85 +157,13 @@ def tools_node(state: TurnState) -> dict[str, Any]:
         llm.history.append({"role": "tool", "tool_name": "list_prompts", "content": catalog})
         results: list[tuple[str, str]] = [("list_prompts", catalog)]
 
-        if branch in {"reflect", "catalog"}:
-            labeled_results: list[tuple[str, str]] = [("list_prompts", catalog)]
-            paths_to_read = PROMPT_FILE_FOR_REFLECT if branch == "reflect" else ()
-            for path in paths_to_read:
-                try:
-                    content = on_tool("read_file", {"path": path})
-                except Exception as exc:
-                    content = f"Error: tool 'read_file' failed: {exc}"
-                llm.history.append(
-                    {"role": "tool", "tool_name": "read_file", "content": f"{path}\n{content}"}
-                )
-                labeled_results.append((path, content))
-                results.append((path, content))
-            reflect = branch == "reflect"
-            reply = llm.synthesize_prompt_reply(
-                user_text,
-                labeled_results,
-                reflect=reflect,
-                on_thought=on_thought,
-            )
-            source = "prompt_reply" if reply else ""
-            if not reply:
-                reply = llm._finalize_tool_synthesis(user_text, memory_block, on_thought)
-                source = "tool_synthesis" if reply else source
-            if not reply and reflect:
-                from bob.llm import _format_tool_results_block, format_prompt_reflect_fallback
-
-                system_body = ""
-                for name, content in labeled_results:
-                    if str(name).endswith("system.txt"):
-                        system_body = content
-                        break
-                reply = format_prompt_reflect_fallback(system_body)
-                if reply:
-                    llm.history.append({"role": "assistant", "content": reply})
-                    source = "reflect_fallback"
-                else:
-                    prompt_block = _format_tool_results_block(labeled_results[1:])
-                    reply = llm._generate_spoken_answer(
-                        user_text,
-                        memory_block=f"Prompt files (background only):\n\n{prompt_block}\n\n{memory_block}".strip(),
-                    )
-                    if reply and not reply.startswith("Sorry"):
-                        llm.history.append({"role": "assistant", "content": reply})
-                        source = "spoken_answer"
-            if not reply:
-                reply = format_prompt_catalog_reply(catalog)
-                llm.history.append({"role": "assistant", "content": reply})
-                source = "catalog_fallback"
-            # #region agent log
-            try:
-                import json
-                import time
-                from pathlib import Path
-
-                Path(__file__).resolve().parents[3].joinpath("debug-234d60.log").open("a", encoding="utf-8").write(
-                    json.dumps(
-                        {
-                            "sessionId": "234d60",
-                            "hypothesisId": "D",
-                            "location": "tools.py:prompts",
-                            "message": "prompt synthesis outcome",
-                            "data": {
-                                "branch": branch,
-                                "source": source,
-                                "reply_chars": len(reply or ""),
-                                "reply_preview": (reply or "")[:80],
-                                "files_read": len(paths_to_read),
-                            },
-                            "timestamp": int(time.time() * 1000),
-                        }
-                    )
-                    + "\n"
-                )
-            except Exception:
-                pass
-            # #endregion
+        if branch == "catalog":
+            reply = format_prompt_catalog_reply(catalog)
+            llm._append_internal_thought("Summarized the prompt files.", on_thought)
             if reply:
-                return _spoken_update(reply, used_tools=True, results=results)
+                llm.history.append({"role": "assistant", "content": reply})
+            if reply:
+                return _spoken_update(reply, used_tools=True, results=results, trusted=True)
 
         system_text = ""
         try:
@@ -306,7 +176,7 @@ def tools_node(state: TurnState) -> dict[str, Any]:
         if reply:
             llm._append_internal_thought("Spoke the prompt file contents.", on_thought)
             llm.history.append({"role": "assistant", "content": reply})
-            return _spoken_update(reply, used_tools=True, results=results)
+            return _spoken_update(reply, used_tools=True, results=results, trusted=True)
 
     if kind == "calendar" and on_tool:
         llm._append_internal_thought("Calendar question: calling get_current_time.", on_thought)
@@ -353,7 +223,13 @@ def tools_node(state: TurnState) -> dict[str, Any]:
     )
 
 
-def _spoken_update(reply: str, *, used_tools: bool, results: list[tuple[str, str]]) -> dict[str, Any]:
+def _spoken_update(
+    reply: str,
+    *,
+    used_tools: bool,
+    results: list[tuple[str, str]],
+    trusted: bool = False,
+) -> dict[str, Any]:
     return {
         "draft": reply,
         "spoken": reply,
@@ -361,6 +237,7 @@ def _spoken_update(reply: str, *, used_tools: bool, results: list[tuple[str, str
         "used_tools": used_tools,
         "tool_results": results,
         "gate_ok": bool(reply.strip()),
+        "trusted_reply": trusted,
     }
 
 

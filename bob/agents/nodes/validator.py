@@ -16,7 +16,10 @@ def regex_gate_node(state: TurnState) -> dict[str, Any]:
     user_text = str(state.get("user_text") or "")
     draft = str(state.get("spoken") or state.get("draft") or "")
     cleaned = _sanitize_spoken_reply(draft, None, user_text) or draft
-    ok = bool(cleaned.strip()) and _looks_like_spoken_answer(cleaned, user_text)
+    if state.get("trusted_reply"):
+        ok = bool(cleaned.strip())
+    else:
+        ok = bool(cleaned.strip()) and _looks_like_spoken_answer(cleaned, user_text)
     runtime = get_runtime()
     if ok:
         runtime.llm._append_internal_thought("Regex gate accepted the spoken reply.", runtime.on_thought)
@@ -48,6 +51,18 @@ def validator_node(state: TurnState) -> dict[str, Any]:
     sample = random.random() < float(runtime.score_sample_rate or 0)
     blocking = not bool(state.get("gate_ok"))
     llm_score = used_tools and runtime.validator_on_tools or sample
+
+    if state.get("trusted_reply") and draft.strip():
+        scores = heuristic_scores(draft, user_text)
+        scores["prompt_version"] = int(state.get("prompt_version") or 0)
+        return {
+            "draft": draft,
+            "spoken": draft,
+            "chunks": list(state.get("chunks") or [draft]),
+            "gate_ok": True,
+            "scores": scores,
+            "repair_count": repair_count,
+        }
 
     if blocking:
         reply = llm._recover_reply(

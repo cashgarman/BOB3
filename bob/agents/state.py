@@ -30,6 +30,7 @@ class TurnState(TypedDict, total=False):
     scores: TurnScores
     used_tools: bool
     gate_ok: bool
+    trusted_reply: bool
     repair_count: int
     prompt_version: int
     session_id: int

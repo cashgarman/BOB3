@@ -975,6 +975,8 @@ class Assistant:
         self._barge_endpointer.min_speech_ms = int(s.barge_in_speech_ms)
 
     def _preload_safe(self) -> None:
+        if self.state in {State.THINKING, State.SPEAKING}:
+            return
         try:
             self._toast_load(f"Loading {self.llm.model}…")
             self.llm.preload()
@@ -1775,7 +1777,7 @@ class Assistant:
             self._state_detail = detail or ""
 
         def apply() -> None:
-            if self._overlay_should_update() and self.overlay:
+            if self.overlay and (self._overlay_should_update() or self._overlay_viewable()):
                 self.overlay.set_state(state, detail)
             if self.hud and self.hud.is_open():
                 self.hud.set_state(state, detail)
